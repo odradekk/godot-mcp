@@ -81,10 +81,38 @@ test('stop_project waits for the exit and returns the final output and exit code
   assert.deepEqual(result.finalErrors, ['a warning']);
 });
 
-test('a game that does not exit after being killed is reported as still running', async (t) => {
+test('stop_project ends a game that ignores SIGTERM with SIGKILL', async (t) => {
+  const { close, run, stop } = await setup(t, { stopTimeoutMs: 50 });
+  t.after(close);
+  const game = await run();
+  game.ignoredSignals = ['SIGTERM'];
+
+  const result = JSON.parse(text(await stop()));
+
+  assert.deepEqual(game.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(result.message, 'Godot project stopped');
+  assert.equal(result.running, false);
+});
+
+test('a new run ends a previous game that ignores SIGTERM with SIGKILL', async (t) => {
+  const { close, run, debugOutput } = await setup(t, { stopTimeoutMs: 50 });
+  t.after(close);
+  const first = await run();
+  first.ignoredSignals = ['SIGTERM'];
+
+  const second = await run();
+  second.stdout.write('from the second run\n');
+
+  assert.deepEqual(first.signals, ['SIGTERM', 'SIGKILL']);
+  const output = await debugOutput();
+  assert.equal(output.running, true);
+  assert.deepEqual(output.output, ['from the second run']);
+});
+
+test('a game that survives SIGKILL is reported as still running', async (t) => {
   const { close, run, stop } = await setup(t, { stopTimeoutMs: 50 });
   const game = await run();
-  game.ignoreKill = true;
+  game.ignoredSignals = ['SIGTERM', 'SIGKILL'];
   t.after(async () => {
     game.exit(null);
     await close();
@@ -92,7 +120,7 @@ test('a game that does not exit after being killed is reported as still running'
 
   const result = JSON.parse(text(await stop()));
 
-  assert.equal(result.message, 'Godot project was killed but did not exit within 0.05 s');
+  assert.equal(result.message, 'Godot project did not exit within 0.05 s of SIGTERM or 0.05 s of SIGKILL');
   assert.equal(result.running, true);
 });
 

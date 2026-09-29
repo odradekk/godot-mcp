@@ -184,24 +184,35 @@ export class ProjectRunner {
   }
 
   /**
-   * Kill the running game and wait up to stopTimeoutMs for it to exit. Returns the final snapshot
-   * (still running if the process did not exit in time), or null if no game is running.
+   * Stop the running game: send SIGTERM, and SIGKILL if it has not exited within stopTimeoutMs,
+   * then wait up to stopTimeoutMs again. Returns the final snapshot (still running if the process
+   * outlived both), or null if no game is running.
    */
   async stop(): Promise<RunSnapshot | null> {
     const run = this.current;
     if (!run?.running) return null;
 
-    run.process.kill();
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, this.stopTimeoutMs);
-    });
-    await Promise.race([run.finished, timeout]);
-    clearTimeout(timer);
+    // SIGKILL ensures no game outlives stop_project, the next run_project or the server. On Windows
+    // the first kill already ends the process, whatever the signal.
+    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+      run.process.kill(signal);
+      if (await exitsWithin(run, this.stopTimeoutMs)) break;
+    }
     return this.snapshot();
   }
 
   get stopTimeoutMs(): number {
     return this.options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
   }
+}
+
+/** Wait up to `ms` for the run's process to exit; returns whether it did */
+async function exitsWithin(run: Run, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  await Promise.race([run.finished, timeout]);
+  clearTimeout(timer);
+  return !run.running;
 }

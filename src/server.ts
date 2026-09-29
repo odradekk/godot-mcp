@@ -103,7 +103,10 @@ export interface GodotServerConfig {
   launcher?: GodotLauncher;
   /** Time limit for one Godot operation or import, in milliseconds. Defaults to 5 minutes. */
   operationTimeoutMs?: number;
-  /** How long stop_project and shutdown wait for the game to exit after killing it, in milliseconds. Defaults to 5 seconds. */
+  /**
+   * How long stop_project, run_project and shutdown wait for the game to exit after SIGTERM, and
+   * again after SIGKILL, in milliseconds. Defaults to 5 seconds.
+   */
   stopTimeoutMs?: number;
   /** Attach Godot's remote debugger to games started by run_project (Godot 4.2+). Defaults to true. */
   remoteDebugger?: boolean;
@@ -1163,8 +1166,9 @@ export class GodotServer {
       ]);
     }
 
+    const seconds = this.runner.stopTimeoutMs / 1000;
     const message = run.running
-      ? `Godot project was killed but did not exit within ${this.runner.stopTimeoutMs / 1000} s`
+      ? `Godot project did not exit within ${seconds} s of SIGTERM or ${seconds} s of SIGKILL`
       : 'Godot project stopped';
     return {
       content: [
