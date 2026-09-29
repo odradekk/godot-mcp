@@ -745,7 +745,9 @@ export class GodotServer {
   }
 
   private async handleRunProject(args: ToolArgs): Promise<ToolReply> {
-    const cmdArgs = ['-d', '--path', args.projectPath];
+    // No -d: the local debugger would stop the game at the first script error and wait for commands
+    // on stdin, which no tool can send. Errors and their GDScript backtraces still reach stderr.
+    const cmdArgs = ['--path', args.projectPath];
     if (args.scene) {
       cmdArgs.push(args.scene);
     }
@@ -754,7 +756,7 @@ export class GodotServer {
     await this.runner.start(this.godotPath!, cmdArgs);
 
     return {
-      content: [{ type: 'text', text: `Godot project started in debug mode. Use get_debug_output to see output.` }],
+      content: [{ type: 'text', text: `Godot project started. Use get_debug_output to see its output and errors.` }],
     };
   }
 

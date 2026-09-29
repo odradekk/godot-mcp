@@ -62,7 +62,7 @@ Godot MCP enables AI agents to launch the Godot editor, run projects, capture de
 ## Features
 
 - **Launch Godot Editor**: Open the Godot editor for a specific project
-- **Run Godot Projects**: Execute Godot projects in debug mode
+- **Run Godot Projects**: Run Godot projects; script errors are reported without pausing the game
 - **Capture Debug Output**: Retrieve console output and error messages
 - **Control Execution**: Start and stop Godot projects programmatically
 - **Get Godot Version**: Retrieve the installed Godot version
