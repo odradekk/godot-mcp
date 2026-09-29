@@ -72,6 +72,23 @@ const COMPONENTS: Partial<Record<VariantType, number>> = {
 };
 const INTEGER_COMPONENTS = new Set([VariantType.VECTOR2I, VariantType.RECT2I, VariantType.VECTOR3I, VariantType.VECTOR4I]);
 
+// Variant type of each decoded array or object, since a Vector2 and an Array of two numbers decode
+// to the same JS value. Godot does not always declare the type elsewhere: script members arrive
+// with a NIL property type.
+const decodedTypes = new WeakMap<object, VariantType>();
+
+/**
+ * The Variant type an array or object value was decoded from, if it came from decodeVariant.
+ */
+export function decodedVariantType(value: unknown): VariantType | undefined {
+  return typeof value === 'object' && value !== null ? decodedTypes.get(value) : undefined;
+}
+
+function tagged<T extends object>(value: T, type: VariantType): T {
+  decodedTypes.set(value, type);
+  return value;
+}
+
 export type Variant =
   | null
   | boolean
@@ -114,7 +131,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
       const at = pos + size * i;
       values.push(integer ? (wide ? Number(buf.readBigInt64LE(at)) : buf.readInt32LE(at)) : wide ? buf.readDoubleLE(at) : buf.readFloatLE(at));
     }
-    return [values, pos + size * components];
+    return [tagged(values, type), pos + size * components];
   }
 
   switch (type) {
@@ -132,7 +149,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
     case VariantType.COLOR: {
       // Colors are always 32-bit floats
       const values = [0, 1, 2, 3].map((i) => buf.readFloatLE(pos + 4 * i));
-      return [values, pos + 16];
+      return [tagged(values, type), pos + 16];
     }
     case VariantType.NODE_PATH: {
       const names = buf.readUInt32LE(pos) & 0x7fffffff;
@@ -149,7 +166,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
     case VariantType.OBJECT: {
       if (wide) {
         const objectId = buf.readBigUInt64LE(pos);
-        return [{ objectId }, pos + 8];
+        return [tagged({ objectId }, type), pos + 8];
       }
       const className = readString();
       if (!className) return [null, pos];
@@ -162,7 +179,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
         object[name] = value;
         pos = next;
       }
-      return [object, pos];
+      return [tagged(object, type), pos];
     }
     case VariantType.CALLABLE:
       return [null, pos];
@@ -183,7 +200,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
         dictionary[typeof key === 'string' ? key : stringify(key)] = value;
         pos = afterValue;
       }
-      return [dictionary, pos];
+      return [tagged(dictionary, type), pos];
     }
     case VariantType.ARRAY: {
       // Typed arrays carry element type info, flagged in header bits 16-17
@@ -196,11 +213,11 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
         array.push(value);
         pos = next;
       }
-      return [array, pos];
+      return [tagged(array, type), pos];
     }
     case VariantType.PACKED_BYTE_ARRAY: {
       const length = buf.readUInt32LE(pos);
-      return [[...buf.subarray(pos + 4, pos + 4 + length)], pos + 4 + padded(length)];
+      return [tagged([...buf.subarray(pos + 4, pos + 4 + length)], type), pos + 4 + padded(length)];
     }
     case VariantType.PACKED_INT32_ARRAY:
     case VariantType.PACKED_INT64_ARRAY:
@@ -219,14 +236,14 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
                 : buf.readDoubleLE(at)
         );
       }
-      return [values, pos + size * count];
+      return [tagged(values, type), pos + size * count];
     }
     case VariantType.PACKED_STRING_ARRAY: {
       const count = buf.readUInt32LE(pos);
       pos += 4;
       const values: string[] = [];
       for (let i = 0; i < count; i++) values.push(readString());
-      return [values, pos];
+      return [tagged(values, type), pos];
     }
     case VariantType.PACKED_VECTOR2_ARRAY:
     case VariantType.PACKED_VECTOR3_ARRAY:
@@ -245,7 +262,7 @@ export function decodeVariant(buf: Buffer, offset = 0): [Variant, number] {
         }
         values.push(item);
       }
-      return [values, pos + size * components * count];
+      return [tagged(values, type), pos + size * components * count];
     }
     default:
       throw new Error(`Unsupported Variant type ${type}`);
@@ -324,7 +341,7 @@ function uint32(value: number): Buffer {
 
 function int64(value: bigint): Buffer {
   const buf = Buffer.alloc(8);
-  buf.writeBigInt64LE(value);
+  buf.writeBigInt64LE(BigInt.asIntN(64, value));
   return Buffer.concat([uint32(VariantType.INT | FLAG_64), buf]);
 }
 
