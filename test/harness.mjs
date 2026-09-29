@@ -1,6 +1,8 @@
 // Test harness: builds the server from build/ and talks to it through an in-process MCP client.
 import { EventEmitter } from 'node:events';
-import { normalize } from 'node:path';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, normalize } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -73,4 +75,19 @@ export async function connect(config = {}) {
 /** Concatenated text content of a tool result. */
 export function text(result) {
   return result.content.map((item) => item.text).join('\n');
+}
+
+/**
+ * Create a temporary Godot project containing `files` (path relative to the project -> content),
+ * removed when the test ends.
+ */
+export async function makeProject(t, files = {}) {
+  const projectPath = await mkdtemp(join(tmpdir(), 'godot-mcp-test-'));
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  const all = { 'project.godot': 'config_version=5\n', ...files };
+  for (const [path, content] of Object.entries(all)) {
+    await mkdir(dirname(join(projectPath, path)), { recursive: true });
+    await writeFile(join(projectPath, path), content);
+  }
+  return projectPath;
 }
