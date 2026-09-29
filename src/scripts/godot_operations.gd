@@ -1076,59 +1076,23 @@ func resave_resources(params):
             printerr("Failed to load: " + scene_path)
             exit_code = 1
     
-    # Get all .gd and .shader files
+    # Get all .gd and .gdshader files (Godot 3 .shader files are not Godot 4 resources and have no UID)
     if debug_mode:
         print("Searching for script and shader files in: " + project_path)
-    var scripts = find_files(project_path, ".gd") + find_files(project_path, ".shader") + find_files(project_path, ".gdshader")
+    var scripts = find_files(project_path, ".gd") + find_files(project_path, ".gdshader")
     if debug_mode:
         print("Found " + str(scripts.size()) + " scripts/shaders")
     
-    # Check for missing .uid files
+    # Missing .uid files are generated beforehand by the editor's filesystem scan (godot --import).
+    # ResourceSaver does not write them when running outside the editor, so only verify here.
     var missing_uids = 0
-    var generated_uids = 0
-    
     for script_path in scripts:
-        if debug_mode:
-            print("Checking UID for: " + script_path)
-        var uid_path = script_path + ".uid"
-        
-        var uid_check = FileAccess.file_exists(uid_path)
-        if debug_mode:
-            print("UID file exists check: " + str(uid_check))
-        
-        var f = FileAccess.open(uid_path, FileAccess.READ)
-        if not f:
+        if ResourceLoader.get_resource_uid(script_path) == ResourceUID.INVALID_ID:
             missing_uids += 1
-            if debug_mode:
-                print("Missing UID file for: " + script_path + ", generating...")
-            
-            # Force a save to generate UID
-            var res = load(script_path)
-            if res:
-                var error = ResourceSaver.save(res, script_path)
-                if debug_mode:
-                    print("Save result: " + str(error) + " (OK=" + str(OK) + ")")
-                
-                if error == OK:
-                    generated_uids += 1
-                    if debug_mode:
-                        print("Generated UID for: " + script_path)
-                    
-                        # Verify the UID file was actually created
-                        var uid_check_after = FileAccess.file_exists(uid_path)
-                        print("UID file exists check after save: " + str(uid_check_after))
-                    
-                        if not uid_check_after:
-                            printerr("UID file reported as generated but does not exist at: " + uid_path)
-                            exit_code = 1
-                else:
-                    printerr("Failed to generate UID for: " + script_path + ", error: " + str(error))
-                    exit_code = 1
-            else:
-                printerr("Failed to load resource: " + script_path)
-                exit_code = 1
+            printerr("No UID for: " + script_path)
+            exit_code = 1
         elif debug_mode:
-            print("UID file already exists for: " + script_path)
+            print("UID exists for: " + script_path)
     
     if debug_mode:
         print("Summary:")
@@ -1136,7 +1100,6 @@ func resave_resources(params):
         print("- Scenes successfully saved: " + str(success_count))
         print("- Scenes with errors: " + str(error_count))
         print("- Scripts/shaders missing UIDs: " + str(missing_uids))
-        print("- UIDs successfully generated: " + str(generated_uids))
     print("Resave operation complete")
 
 # Save changes to a scene file
