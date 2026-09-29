@@ -53,7 +53,8 @@ export function scriptOperation(
   solutions: string[]
 ): Promise<any> {
   // An argument array reaches Godot without shell interpretation
-  const args = ['--headless', '--path', projectPath, '--script', OPERATIONS_SCRIPT, operation, JSON.stringify(params)];
+  // Arguments after "--" reach the script, not Godot
+  const args = ['--headless', '--path', projectPath, '--script', OPERATIONS_SCRIPT, '--', operation, JSON.stringify(params)];
   if (ctx.debugMode) args.push('--debug-godot');
   ctx.log(`Executing: ${ctx.godotPath} ${args.join(' ')}`);
   return runGodot(ctx, args, readOperationOutcome, failure, solutions);

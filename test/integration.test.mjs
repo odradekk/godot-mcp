@@ -71,6 +71,12 @@ test('real Godot: scene operations report results and failures', { skip }, async
   assert.equal(badRoot.isError, true);
   assert.match(badRoot.content[0].text, /^Failed to create scene: Failed to instantiate node of type: NotAType\./);
 
+  const abstractRoot = await call(client, 'create_scene', { projectPath, scenePath: 'abstract.tscn', rootNodeType: 'CanvasItem' });
+  assert.equal(
+    abstractRoot.content[0].text,
+    'Failed to create scene: Failed to instantiate node of type: CanvasItem. It is an abstract class that cannot be instantiated.'
+  );
+
   const added = await call(client, 'add_node', {
     projectPath, scenePath: 'scenes/main.tscn', nodeType: 'Sprite2D', nodeName: 'Hero', properties: { position: { x: 3, y: 4 } },
   });
