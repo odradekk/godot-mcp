@@ -41,15 +41,19 @@ By participating in this project, you agree to maintain a respectful and inclusi
 2. Install dependencies with `npm install`
 3. Build the project with `npm run build`
 4. For development with auto-rebuild, use `npm run watch`
+5. Run the tests with `npm test`. Integration tests that need a real Godot binary run only when `GODOT_PATH` is set.
 
 ### Project Structure
 
 ```
 godot-mcp/
 ├── src/             # Source code
-│   └── index.ts     # Main server implementation
+│   ├── index.ts     # Entry point: serves over stdio
+│   ├── server.ts    # MCP server and tool handlers
+│   ├── godot-launcher.ts  # Starts Godot processes (replaced by a fake in tests)
+│   └── scripts/     # GDScript run by Godot for scene operations
 ├── build/           # Compiled JavaScript (generated)
-├── tests/           # Test files (future)
+├── test/            # node:test suites, run against build/
 ├── examples/        # Example Godot projects (future)
 ├── LICENSE          # MIT License
 ├── README.md        # Documentation
