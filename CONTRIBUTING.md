@@ -53,9 +53,12 @@ godot-mcp/
 │   ├── tool-requests.ts   # Tool schemas and request checks, from each tool's declaration
 │   ├── godot-launcher.ts  # Starts Godot processes (replaced by a fake in tests)
 │   ├── godot-run.ts # The game run behind run_project, get_debug_output and stop_project
+│   ├── debug-session.ts   # Server side of Godot's remote debugger protocol for one run
+│   ├── variant.ts   # Godot's binary Variant format, used by the debugger protocol
 │   └── scripts/     # GDScript run by Godot for scene operations
 ├── build/           # Compiled JavaScript (generated)
 ├── test/            # node:test suites, run against build/
+│   └── fixtures/    # Debugger frames recorded by scripts/record-debugger-fixtures.mjs
 ├── examples/        # Example Godot projects (future)
 ├── LICENSE          # MIT License
 ├── README.md        # Documentation

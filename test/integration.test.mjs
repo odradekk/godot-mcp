@@ -196,3 +196,38 @@ test('real Godot: a script error does not pause the game', { skip }, async (t) =
   assert.ok(run.output.includes('still running after the error'), run.output.join('\n'));
   assert.ok(run.errors.some((line) => line.includes("SCRIPT ERROR: Invalid call. Nonexistent function 'foo'")), run.errors.join('\n'));
 });
+
+test('real Godot: the remote debugger reports each distinct error once, with its line', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const projectPath = await gameProject(
+    t,
+    [
+      'extends Node', //                          1
+      '', //                                      2
+      'var frames = 0', //                        3
+      'func _ready():', //                        4
+      '\tpush_error("pushed error")', //          5
+      '\tpush_warning("pushed warning")', //      6
+      '\tvar x = null', //                        7
+      '\tx.foo()', //                             8
+      'func _process(_delta):', //                9
+      '\tframes += 1', //                         10
+      '\tif frames == 120:', //                   11
+      '\t\tget_tree().quit(3)', //                12
+      '\tvar y = null', //                        13
+      '\ty.bar()', //                             14
+    ].join('\n') + '\n'
+  );
+
+  await call(client, 'run_project', { projectPath });
+  const run = await waitForRunEnd(client);
+  const find = (text) => run.reportedErrors.filter((error) => error.message.includes(text));
+
+  assert.equal(run.exitCode, 3, 'the game should reach its quit, never pausing');
+  assert.deepEqual(run.debugger, { attached: true });
+  assert.deepEqual(find('pushed error').map(({ file, line, warning }) => ({ file, line, warning })), [{ file: 'res://main.gd', line: 5, warning: false }]);
+  assert.deepEqual(find('pushed warning').map(({ line, warning }) => ({ line, warning })), [{ line: 6, warning: true }]);
+  assert.deepEqual(find("'foo'").map(({ line }) => line), [8]);
+  assert.deepEqual(find("'bar'").map(({ line }) => line), [14]);
+  assert.ok(find("'bar'")[0].count > 100, `per-frame error count: ${find("'bar'")[0].count}`);
+});
