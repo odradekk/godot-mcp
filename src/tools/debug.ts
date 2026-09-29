@@ -48,10 +48,7 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
       failure: 'Failed to pause the game',
       handle: async () => {
         const session = requireSession(ctx.runner);
-        if (session.isPaused) return debugStateReply(ctx, session);
-        const since = session.pauseNumber;
-        session.pauseGame();
-        if (!(await session.waitForPause(since, 3000))) throw new ToolError('The game did not pause within 3 s');
+        if (!session.isPaused && !(await session.pauseGame(3000))) throw new ToolError('The game did not pause within 3 s');
         return debugStateReply(ctx, session);
       },
     },
@@ -84,9 +81,7 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         if (action === 'out' && !godotVersionAtLeast(await ctx.godotVersion(), [4, 6])) {
           throw new ToolError('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
         }
-        const since = session.pauseNumber;
-        session.resume(action);
-        await session.waitForPause(since, args.waitMs);
+        await session.resume(action, args.waitMs);
         return debugStateReply(ctx, session);
       },
     },
@@ -110,8 +105,8 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
           throw sessionUnavailable(ctx.runner.noSessionReason());
         }
         const frame: number = args.frame;
-        if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, args.waitMs);
-        else if (session.isPaused && !session.pause) await session.waitForPause(session.pauseNumber - 1, 3000);
+        if (session.isPaused) await session.capturedPause(3000);
+        else if (args.waitMs) await session.nextPause(args.waitMs);
         if (frame !== 0) {
           const pause = session.pause;
           if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');

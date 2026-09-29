@@ -92,13 +92,23 @@ export interface PauseState {
   variables: { locals: Record<string, unknown>; members: Record<string, unknown> } | null;
 }
 
+/** Where the game is. A paused state's `pause` is null while it is being read. */
+type GameState =
+  | { kind: 'waiting' }
+  | { kind: 'running' }
+  | { kind: 'paused'; thread: number | bigint; pause: PauseState | null }
+  /** The connection closed, or close() was called */
+  | { kind: 'closed'; wasConnected: boolean };
+
 export class DebugSession {
   private server: net.Server | null = null;
   private socket: net.Socket | null = null;
   // The game drops messages addressed to a thread it does not know, so reuse the one it sends
   private threadId: number | bigint = 0;
-  private connected = false;
-  private closed = false;
+  private state: GameState = { kind: 'waiting' };
+  // Woken on every state change and when a pause's state has been read
+  private stateWaiters: Array<() => void> = [];
+  private lastAction: ResumeAction | 'pause' | null = null;
   private readonly startedAt = Date.now();
   private errors = new Map<string, ReportedError>();
   /** Error reports not stored because MAX_REPORTED_ERRORS distinct errors were already kept */
@@ -120,30 +130,23 @@ export class DebugSession {
       inspectObjects: boolean;
       /** Pause on script errors instead of letting the game run through them */
       breakOnError: boolean;
-      /** Breakpoints to set when the game connects */
-      breakpoints: Breakpoint[];
+      /** The breakpoints, kept by the caller: sent when the game connects, and read for breakpoint skipping */
+      breakpoints: ReadonlyMap<string, Breakpoint>;
       log?: (message: string) => void;
     }
-  ) {
-    for (const breakpoint of options.breakpoints) this.breakpoints.set(breakpointKey(breakpoint), breakpoint);
-  }
-
-  private breakpoints = new Map<string, Breakpoint>();
-  // Pausing and stepping stop through the breakpoint path, which set_skip_breakpoints also skips,
-  // so breakpoints are skipped only while none are set and the agent is not pausing or stepping
-  private debugging = false;
-  // Thread that sent the current debug_enter, or null while running
-  private pausedThread: number | bigint | null = null;
-  // Counts pauses, so a waiter can ask for one that started after it began waiting
-  private pauseCount = 0;
-  private pauseState: PauseState | null = null;
-  private lastAction: ResumeAction | 'pause' | null = null;
-  private pauseWaiters: Array<() => void> = [];
-  // The game connected and the connection has since closed
-  private disconnected = false;
+  ) {}
 
   get isConnected(): boolean {
-    return this.connected && !this.closed && !!this.socket && !this.socket.destroyed;
+    return this.state.kind === 'running' || this.state.kind === 'paused';
+  }
+
+  private setState(state: GameState) {
+    this.state = state;
+    this.notifyStateWaiters();
+  }
+
+  private notifyStateWaiters() {
+    for (const check of [...this.stateWaiters]) check();
   }
 
   /**
@@ -160,7 +163,8 @@ export class DebugSession {
   }
 
   status(): DebuggerStatus {
-    return this.connected ? { attached: true } : { attached: false, reason: 'The game has not connected to the debugger' };
+    const attached = this.isConnected || (this.state.kind === 'closed' && this.state.wasConnected);
+    return attached ? { attached: true } : { attached: false, reason: 'The game has not connected to the debugger' };
   }
 
   reportedErrors(): ReportedError[] {
@@ -172,14 +176,14 @@ export class DebugSession {
    * before exiting are still read. A request in flight fails.
    */
   close() {
-    this.closed = true;
+    if (this.state.kind !== 'closed') this.setState({ kind: 'closed', wasConnected: this.isConnected });
     this.server?.close();
     this.socket?.end();
     this.pending?.fail(new Error('The debug session was closed'));
   }
 
   private accept(socket: net.Socket) {
-    if (this.socket || this.closed) {
+    if (this.socket || this.state.kind === 'closed') {
       socket.destroy();
       return;
     }
@@ -198,11 +202,8 @@ export class DebugSession {
     socket.on('error', (error) => this.options.log?.(`Debugger connection error: ${error.message}`));
     // A closed connection resumes a paused game (Godot leaves its break loop)
     socket.on('close', () => {
-      this.disconnected = true;
       this.pending?.fail(new Error('The game disconnected from the debugger'));
-      this.pausedThread = null;
-      this.pauseState = null;
-      this.notifyPauseWaiters();
+      if (this.state.kind !== 'closed') this.setState({ kind: 'closed', wasConnected: true });
     });
   }
 
@@ -223,12 +224,12 @@ export class DebugSession {
     if ((typeof threadId === 'number' || typeof threadId === 'bigint') && threadId) {
       this.threadId = threadId;
     }
-    if (!this.connected) {
-      this.connected = true;
+    if (this.state.kind === 'waiting') {
+      this.setState({ kind: 'running' });
       // Skip breakpoint statements unless the agent set breakpoints, and, where Godot allows it,
       // do not break on errors unless asked to
       this.updateSkipBreakpoints();
-      for (const { file, line } of this.breakpoints.values()) this.send('breakpoint', [file, line, true]);
+      for (const { file, line } of this.options.breakpoints.values()) this.send('breakpoint', [file, line, true]);
       if (this.options.ignoreErrorBreaks) this.send('set_ignore_error_breaks', [!this.options.breakOnError]);
     }
 
@@ -238,14 +239,14 @@ export class DebugSession {
       this.recordError(args);
     } else if (name === 'debug_enter') {
       this.enterPause(args);
-    } else if (name === 'debug_exit') {
-      this.pausedThread = null;
-      this.pauseState = null;
+    } else if (name === 'debug_exit' && this.state.kind === 'paused') {
+      this.setState({ kind: 'running' });
     }
   }
 
   // debug_enter is [can_continue, error_text, has_stack, thread_id]
   private enterPause(args: Variant[]) {
+    if (this.state.kind === 'closed') return;
     const [, text, , threadId] = args;
     const errorText = String(text ?? '');
     const isError = !['', 'Breakpoint', 'Breakpoint Statement'].includes(errorText);
@@ -261,13 +262,12 @@ export class DebugSession {
         : errorText === '' ? 'pause'
           : this.lastAction === 'step' || this.lastAction === 'next' || this.lastAction === 'out' ? 'step'
             : 'breakpoint';
-    this.pausedThread = thread;
-    this.pauseState = null;
-    const pause = ++this.pauseCount;
-    this.capturePause(pause, reason, isError ? errorText : undefined);
+    const paused: GameState = { kind: 'paused', thread, pause: null };
+    this.setState(paused);
+    this.capturePause(paused, reason, isError ? errorText : undefined);
   }
 
-  private async capturePause(pause: number, reason: string, error?: string) {
+  private async capturePause(paused: GameState & { kind: 'paused' }, reason: string, error?: string) {
     let stack: StackFrame[] = [];
     let variables: PauseState['variables'] = null;
     try {
@@ -277,76 +277,88 @@ export class DebugSession {
       this.options.log?.(`Could not read the paused game's state: ${failure instanceof Error ? failure.message : failure}`);
     }
     // The game may have resumed while the state was being read
-    if (pause !== this.pauseCount || this.pausedThread === null) return;
-    this.pauseState = { reason, ...(error ? { error } : {}), stack, frame: 0, variables };
-    this.notifyPauseWaiters();
+    // The game may have resumed while the state was being read
+    if (this.state !== paused) return;
+    paused.pause = { reason, ...(error ? { error } : {}), stack, frame: 0, variables };
+    this.notifyStateWaiters();
   }
 
   /** The current pause, once its state has been read; null while running */
   get pause(): PauseState | null {
-    return this.pausedThread === null ? null : this.pauseState;
+    return this.state.kind === 'paused' ? this.state.pause : null;
   }
 
   get isPaused(): boolean {
-    return this.pausedThread !== null;
+    return this.state.kind === 'paused';
+  }
+
+  // The thread the game paused on, which messages about the pause must name
+  private get pausedThread(): number | bigint | undefined {
+    return this.state.kind === 'paused' ? this.state.thread : undefined;
   }
 
   /**
-   * Wait up to `timeoutMs` for a pause (with its state read) that began after `afterPause`
-   * (a value of pauseNumber), including while the game has yet to connect. Resolves with null on
-   * timeout or when the connection closes.
+   * The first pause that begins after this call, once its state has been read, including while the
+   * game has yet to connect. Null on timeout or when the session closes.
    */
-  waitForPause(afterPause: number, timeoutMs: number): Promise<PauseState | null> {
+  nextPause(timeoutMs: number): Promise<PauseState | null> {
+    const before = this.state;
+    return this.waitForState(() => {
+      if (this.state.kind === 'closed') return null;
+      return this.state.kind === 'paused' && this.state !== before && this.state.pause ? this.state.pause : undefined;
+    }, timeoutMs);
+  }
+
+  /** The pause the game is in, once its state has been read. Null if it is not paused or resumes. */
+  capturedPause(timeoutMs: number): Promise<PauseState | null> {
+    const current = this.state;
+    if (current.kind !== 'paused') return Promise.resolve(null);
+    return this.waitForState(() => (this.state !== current ? null : current.pause ?? undefined), timeoutMs);
+  }
+
+  // Resolve with what `check` returns once it is not undefined, or null after timeoutMs
+  private waitForState(check: () => PauseState | null | undefined, timeoutMs: number): Promise<PauseState | null> {
     return new Promise((resolve) => {
-      const check = () => {
-        if (this.pauseCount > afterPause && this.pause) return finish(this.pause);
-        if (this.disconnected) return finish(null);
-        return false;
-      };
-      const finish = (result: PauseState | null) => {
+      const waiter = () => {
+        const result = check();
+        if (result === undefined) return false;
         clearTimeout(timer);
-        this.pauseWaiters = this.pauseWaiters.filter((waiter) => waiter !== check);
+        this.stateWaiters = this.stateWaiters.filter((other) => other !== waiter);
         resolve(result);
         return true;
       };
-      const timer = setTimeout(() => finish(null), timeoutMs);
-      if (!check()) this.pauseWaiters.push(check);
+      const timer = setTimeout(() => {
+        this.stateWaiters = this.stateWaiters.filter((other) => other !== waiter);
+        resolve(null);
+      }, timeoutMs);
+      if (!waiter()) this.stateWaiters.push(waiter);
     });
   }
 
-  /** Increases with every pause; pass to waitForPause to wait for the next one */
-  get pauseNumber(): number {
-    return this.pauseCount;
-  }
-
-  private notifyPauseWaiters() {
-    for (const check of [...this.pauseWaiters]) check();
-  }
-
-  /** Set or clear a breakpoint in the running game (and in later connections of this session) */
+  /** Send a breakpoint change to the connected game; the caller has already updated the breakpoints */
   setBreakpoint(breakpoint: Breakpoint, enabled: boolean) {
-    if (enabled) this.breakpoints.set(breakpointKey(breakpoint), breakpoint);
-    else this.breakpoints.delete(breakpointKey(breakpoint));
     if (!this.isConnected) return;
     this.send('breakpoint', [breakpoint.file, breakpoint.line, enabled]);
     this.updateSkipBreakpoints();
   }
 
-  /** Ask the running game to pause; its state arrives with the pause (see waitForPause) */
-  pauseGame() {
-    this.debugging = true;
+  /** Ask the running game to pause, and wait up to timeoutMs for the pause with its state */
+  pauseGame(timeoutMs: number): Promise<PauseState | null> {
+    const next = this.nextPause(timeoutMs);
     this.lastAction = 'pause';
     this.updateSkipBreakpoints();
     this.send('break');
+    return next;
   }
 
-  /** Continue or step the paused game */
-  resume(action: ResumeAction) {
+  /** Continue or step the paused game, and wait up to timeoutMs for its next pause */
+  resume(action: ResumeAction, timeoutMs: number): Promise<PauseState | null> {
     const thread = this.pausedThread;
-    this.debugging = action !== 'continue';
+    const next = this.nextPause(timeoutMs);
     this.lastAction = action;
     this.updateSkipBreakpoints();
-    this.send(action, [], thread ?? undefined);
+    this.send(action, [], thread);
+    return next;
   }
 
   /** Locals and members of a frame of the paused game */
@@ -358,7 +370,7 @@ export class DebugSession {
       if (name === 'stack_frame_vars') expected = Number(data[0]);
       else if (name === 'stack_frame_var') vars.push(data);
       return vars.length === expected ? vars : undefined;
-    }, this.pausedThread ?? undefined);
+    }, this.pausedThread);
 
     // Each variable is [name, scope (0 local, 1 member, 2 global), type, value, type_hint]
     const locals: Record<string, unknown> = {};
@@ -375,13 +387,13 @@ export class DebugSession {
    * expression fails, and does not answer at all outside a script instance's frame.
    */
   async evaluate(expression: string, frame: number): Promise<unknown> {
-    const { data } = await this.request('evaluate', [expression, frame], replyNamed('evaluation_return'), this.pausedThread ?? undefined);
+    const { data } = await this.request('evaluate', [expression, frame], replyNamed('evaluation_return'), this.pausedThread);
     // [expression, scope, type, value, type_hint]
     return variantToJson(data[3], this.nodePathOf, Number(data[2]));
   }
 
   private async stackDump(): Promise<StackFrame[]> {
-    const { data } = await this.request('get_stack_dump', [], replyNamed('stack_dump'), this.pausedThread ?? undefined);
+    const { data } = await this.request('get_stack_dump', [], replyNamed('stack_dump'), this.pausedThread);
     // [frame_count * 3, file, line, function, ...]
     const frames: StackFrame[] = [];
     for (let at = 1; at + 2 < data.length && at < Number(data[0]); at += 3) {
@@ -391,7 +403,10 @@ export class DebugSession {
   }
 
   private updateSkipBreakpoints() {
-    this.send('set_skip_breakpoints', [this.breakpoints.size === 0 && !this.debugging]);
+    // Pausing and stepping stop through the breakpoint path, which set_skip_breakpoints also skips,
+    // so breakpoints are skipped only while none are set and the agent is not pausing or stepping
+    const pausingOrStepping = this.lastAction !== null && this.lastAction !== 'continue';
+    this.send('set_skip_breakpoints', [this.options.breakpoints.size === 0 && !pausingOrStepping]);
   }
 
   /**
@@ -596,8 +611,4 @@ export class DebugSession {
 /** Collects the first message named one of `names` */
 function replyNamed(...names: string[]) {
   return (name: string, data: Variant[]) => (names.includes(name) ? { name, data } : undefined);
-}
-
-function breakpointKey({ file, line }: Breakpoint): string {
-  return `${file}:${line}`;
 }
