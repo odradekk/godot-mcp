@@ -122,3 +122,17 @@ test('update_project_uids reports a failed import without running the resave', a
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /^Failed to update project UIDs: Godot import exited with code 1\. Godot stderr:\nERROR: Import failed/);
 });
+
+test('update_project_uids reports an import the launcher stopped as an update failure', async (t) => {
+  const respond = (file, args) => {
+    if (args.includes('--import')) throw new Error('Godot timed out after 1 s and the process was stopped');
+    return godotAt(GODOT)(file, args);
+  };
+  const { client, projectPath } = await setup(t, null, {}, respond);
+
+  const result = await client.callTool({ name: 'update_project_uids', arguments: { projectPath } });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /^Failed to update project UIDs: Godot timed out after 1 s/);
+  assert.match(result.content[1].text, /Check if the project is valid/);
+});

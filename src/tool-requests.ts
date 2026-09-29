@@ -6,6 +6,10 @@
 import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 
+import { Breakpoint } from './debug-session.js';
+import { GodotLauncher } from './godot-launcher.js';
+import { ProjectRunner } from './godot-run.js';
+
 export type ToolArgs = Record<string, any>;
 
 export interface ToolReply {
@@ -48,23 +52,60 @@ export interface ToolDefinition {
   failure: string;
   /** Minimum Godot version, checked before the tool runs. */
   minGodot?: { version: [number, number]; feature: string; solutions: string[] };
-  /** Runs a godot_operations.gd operation with every argument except projectPath. */
-  operation?: {
-    name: string;
-    solutions: string[];
-    render(result: any, args: ToolArgs): string;
-  };
-  /** Runs anything else. Exactly one of operation and handle is set. */
-  handle?(args: ToolArgs): Promise<ToolReply>;
+  /** Runs the tool with checked arguments. Throws ToolError to reply with a failure. */
+  handle(args: ToolArgs): Promise<ToolReply>;
 }
 
-export function errorReply(message: string, possibleSolutions: string[] = []): ToolReply {
+/**
+ * What tools use of the server. Tools are built once Godot has been found.
+ */
+export interface ToolContext {
+  godotPath: string;
+  /** The version string `godot --version` reports */
+  godotVersion(): Promise<string>;
+  launcher: GodotLauncher;
+  runner: ProjectRunner;
+  /** Kept by the server, so they apply to every run */
+  breakpoints: Map<string, Breakpoint>;
+  /** Attach Godot's remote debugger to games started by run_project */
+  remoteDebugger: boolean;
+  /** Time limit for one Godot operation or import, in milliseconds */
+  operationTimeoutMs: number;
+  /** Attach Godot's output to failures and log debug messages */
+  debugMode: boolean;
+  log(message: string): void;
+}
+
+export const projectPathParam: Param = { type: 'string', description: 'Path to the Godot project directory', check: 'project' };
+
+/**
+ * A failure a tool reports to the agent. The reply is the message, then the possible solutions,
+ * then `details` (e.g. Godot's output) when given.
+ */
+export class ToolError extends Error {
+  constructor(message: string, readonly solutions: string[] = [], readonly details?: string) {
+    super(message);
+  }
+}
+
+export function errorReply(message: string, possibleSolutions: string[] = [], details?: string): ToolReply {
   console.error(`[SERVER] Error response: ${message}`);
   const reply: ToolReply = { content: [{ type: 'text', text: message }], isError: true };
   if (possibleSolutions.length > 0) {
     reply.content.push({ type: 'text', text: 'Possible solutions:\n- ' + possibleSolutions.join('\n- ') });
   }
+  if (details) {
+    reply.content.push({ type: 'text', text: details });
+  }
   return reply;
+}
+
+export function textReply(text: string): ToolReply {
+  return { content: [{ type: 'text', text }] };
+}
+
+export function jsonReply(value: unknown): ToolReply {
+  return textReply(JSON.stringify(value, null, 2));
 }
 
 /**
