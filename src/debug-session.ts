@@ -104,7 +104,10 @@ export class DebugSession {
   /** Error reports not stored because MAX_REPORTED_ERRORS distinct errors were already kept */
   droppedErrorReports = 0;
 
-  private waiters: Array<{ names: string[]; resolve: (message: { name: string; data: Variant[] }) => void }> = [];
+  // Godot's replies carry no request id, so requests go out one at a time: `queue` settles when the
+  // last queued request has, and `pending` receives every message while a request is in flight
+  private queue: Promise<unknown> = Promise.resolve();
+  private pending: ((name: string, data: Variant[]) => void) | null = null;
   // From the last scene tree the game sent
   private nodesByPath = new Map<string, RemoteNode>();
   private pathsById = new Map<string, string>();
@@ -138,7 +141,6 @@ export class DebugSession {
   private pauseWaiters: Array<() => void> = [];
   // The game connected and the connection has since closed
   private disconnected = false;
-  private frameVars: { expected: number | null; vars: Variant[][]; resolve: () => void } | null = null;
 
   get isConnected(): boolean {
     return this.connected && !!this.socket && !this.socket.destroyed;
@@ -229,11 +231,7 @@ export class DebugSession {
     }
 
     const args = Array.isArray(data) ? data : [];
-    const waiter = this.waiters.find((candidate) => candidate.names.includes(name));
-    if (waiter) {
-      this.waiters.splice(this.waiters.indexOf(waiter), 1);
-      waiter.resolve({ name, data: args });
-    }
+    this.pending?.(name, args);
     if (name === 'error') {
       this.recordError(args);
     } else if (name === 'debug_enter') {
@@ -241,12 +239,6 @@ export class DebugSession {
     } else if (name === 'debug_exit') {
       this.pausedThread = null;
       this.pauseState = null;
-    } else if (name === 'stack_frame_vars' && this.frameVars) {
-      this.frameVars.expected = Number(args[0]);
-      if (this.frameVars.expected === 0) this.frameVars.resolve();
-    } else if (name === 'stack_frame_var' && this.frameVars) {
-      this.frameVars.vars.push(args);
-      if (this.frameVars.vars.length === this.frameVars.expected) this.frameVars.resolve();
     }
   }
 
@@ -274,17 +266,17 @@ export class DebugSession {
   }
 
   private async capturePause(pause: number, reason: string, error?: string) {
-    let state: PauseState;
+    let stack: StackFrame[] = [];
+    let variables: PauseState['variables'] = null;
     try {
-      const stack = await this.stackDump();
-      state = { reason, ...(error ? { error } : {}), stack, frame: 0, variables: stack.length > 0 ? await this.frameVariables(0) : null };
+      stack = await this.stackDump();
+      if (stack.length > 0) variables = await this.frameVariables(0);
     } catch (failure) {
       this.options.log?.(`Could not read the paused game's state: ${failure instanceof Error ? failure.message : failure}`);
-      state = { reason, ...(error ? { error } : {}), stack: [], frame: 0, variables: null };
     }
     // The game may have resumed while the state was being read
     if (pause !== this.pauseCount || this.pausedThread === null) return;
-    this.pauseState = state;
+    this.pauseState = { reason, ...(error ? { error } : {}), stack, frame: 0, variables };
     this.notifyPauseWaiters();
   }
 
@@ -357,17 +349,14 @@ export class DebugSession {
 
   /** Locals and members of a frame of the paused game */
   async frameVariables(frame: number): Promise<{ locals: Record<string, unknown>; members: Record<string, unknown> }> {
-    const collected = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.frameVars = null;
-        reject(new Error(`The game did not send the variables of frame ${frame} within ${REQUEST_TIMEOUT_MS / 1000} s`));
-      }, REQUEST_TIMEOUT_MS);
-      this.frameVars = { expected: null, vars: [], resolve: () => { clearTimeout(timer); resolve(); } };
-    });
-    const vars = this.frameVars!.vars;
-    this.send('get_stack_frame_vars', [frame], this.pausedThread ?? undefined);
-    await collected;
-    this.frameVars = null;
+    // stack_frame_vars gives the count, then one stack_frame_var arrives per variable
+    let expected: number | null = null;
+    const vars: Variant[][] = [];
+    await this.request('get_stack_frame_vars', [frame], (name, data) => {
+      if (name === 'stack_frame_vars') expected = Number(data[0]);
+      else if (name === 'stack_frame_var') vars.push(data);
+      return vars.length === expected ? vars : undefined;
+    }, this.pausedThread ?? undefined);
 
     // Each variable is [name, scope (0 local, 1 member, 2 global), type, value, type_hint]
     const locals: Record<string, unknown> = {};
@@ -384,13 +373,13 @@ export class DebugSession {
    * expression fails, and does not answer at all outside a script instance's frame.
    */
   async evaluate(expression: string, frame: number): Promise<unknown> {
-    const { data } = await this.request('evaluate', [expression, frame], ['evaluation_return'], this.pausedThread ?? undefined);
+    const { data } = await this.request('evaluate', [expression, frame], replyNamed('evaluation_return'), this.pausedThread ?? undefined);
     // [expression, scope, type, value, type_hint]
     return variantToJson(data[3], this.nodePathOf, Number(data[2]));
   }
 
   private async stackDump(): Promise<StackFrame[]> {
-    const { data } = await this.request('get_stack_dump', [], ['stack_dump'], this.pausedThread ?? undefined);
+    const { data } = await this.request('get_stack_dump', [], replyNamed('stack_dump'), this.pausedThread ?? undefined);
     // [frame_count * 3, file, line, function, ...]
     const frames: StackFrame[] = [];
     for (let at = 1; at + 2 < data.length && at < Number(data[0]); at += 3) {
@@ -407,7 +396,7 @@ export class DebugSession {
    * The live scene tree, rooted at the Window /root. Also refreshes the path cache used by findNode.
    */
   async sceneTree(): Promise<RemoteNode> {
-    const { data } = await this.request('scene:request_scene_tree', [], ['scene:scene_tree']);
+    const { data } = await this.request('scene:request_scene_tree', [], replyNamed('scene:scene_tree'));
     // Nodes arrive in pre-order as [child_count, name, type_name, id, scene_file_path, view_flags]
     let index = 0;
     const readNode = (parentPath: string): RemoteNode => {
@@ -466,11 +455,11 @@ export class DebugSession {
     let object: Variant[];
     if (this.options.inspectObjects) {
       // A missing object is answered with remote_nothing_selected instead
-      const reply = await this.request('scene:inspect_objects', [[BigInt(id)], false], ['scene:inspect_objects', 'remote_nothing_selected', 'remote_objects_selected']);
+      const reply = await this.request('scene:inspect_objects', [[BigInt(id)], false], replyNamed('scene:inspect_objects', 'remote_nothing_selected', 'remote_objects_selected'));
       if (reply.name !== 'scene:inspect_objects' || !Array.isArray(reply.data[0])) return null;
       object = reply.data[0];
     } else {
-      const reply = await this.request('scene:inspect_object', [BigInt(id)], ['scene:inspect_object']);
+      const reply = await this.request('scene:inspect_object', [BigInt(id)], replyNamed('scene:inspect_object'));
       if (reply.data.length < 3) return null;
       object = reply.data;
     }
@@ -494,23 +483,39 @@ export class DebugSession {
   }
 
   /**
-   * Send a message and resolve with the first later message named one of `replyNames`.
+   * Send a message once the requests before it have settled, and resolve with the first result
+   * other than undefined that `collect` returns for the messages received meanwhile.
    */
-  private request(name: string, data: unknown[], replyNames: string[], threadId?: number | bigint): Promise<{ name: string; data: Variant[] }> {
+  private request<T>(
+    name: string,
+    data: unknown[],
+    collect: (name: string, data: Variant[]) => T | undefined,
+    threadId?: number | bigint
+  ): Promise<T> {
+    const result = this.queue.then(() => this.exchange(name, data, collect, threadId));
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private exchange<T>(
+    name: string,
+    data: unknown[],
+    collect: (name: string, data: Variant[]) => T | undefined,
+    threadId?: number | bigint
+  ): Promise<T> {
     if (!this.isConnected) return Promise.reject(new Error('The game is not connected to the debugger'));
     return new Promise((resolve, reject) => {
-      const waiter = {
-        names: replyNames,
-        resolve: (message: { name: string; data: Variant[] }) => {
-          clearTimeout(timer);
-          resolve(message);
-        },
-      };
       const timer = setTimeout(() => {
-        this.waiters.splice(this.waiters.indexOf(waiter), 1);
+        this.pending = null;
         reject(new Error(`The game did not answer ${name} within ${REQUEST_TIMEOUT_MS / 1000} s`));
       }, REQUEST_TIMEOUT_MS);
-      this.waiters.push(waiter);
+      this.pending = (replyName, replyData) => {
+        const result = collect(replyName, replyData);
+        if (result === undefined) return;
+        clearTimeout(timer);
+        this.pending = null;
+        resolve(result);
+      };
       this.send(name, data, threadId);
     });
   }
@@ -560,6 +565,11 @@ export class DebugSession {
       lastSeenMs: now,
     });
   }
+}
+
+/** Collects the first message named one of `names` */
+function replyNamed(...names: string[]) {
+  return (name: string, data: Variant[]) => (names.includes(name) ? { name, data } : undefined);
 }
 
 function breakpointKey({ file, line }: Breakpoint): string {

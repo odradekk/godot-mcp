@@ -131,7 +131,8 @@ export async function makeProject(t, files = {}) {
  * Connect to the debug port in a game's --remote-debug argument, as the real game does.
  * `send(frame)` writes raw frames (see debuggerFixtures); `received` holds the decoded
  * [name, threadId, data] messages from the server, and `waitFor(name)` resolves with the first
- * one of that name. `answer(name, ...frames)` replies to every later message of that name;
+ * one of that name. `answer(name, ...frames)` replies to every later message of that name; a
+ * function among the frames is called with the message's data and returns the frames to send.
  * `rawReceived` keeps each message's bytes for checking encoded Variant types.
  */
 async function connectDebugger(args) {
@@ -151,7 +152,8 @@ async function connectDebugger(args) {
       rawReceived.push(Buffer.from(pending.subarray(4, 4 + length)));
       pending = pending.subarray(4 + length);
       received.push(message);
-      for (const frame of answers.get(message[0]) ?? []) socket.write(frame);
+      const replies = (answers.get(message[0]) ?? []).flatMap((reply) => (typeof reply === 'function' ? reply(message[2]) : [reply]));
+      for (const frame of replies) socket.write(frame);
       for (const waiter of [...waiters]) waiter();
     }
   });

@@ -131,6 +131,33 @@ test('get_debug_state reads the variables of another stack frame', async (t) => 
   assert.equal(outOfRange.content.at(-1).text, 'frame must be between 0 and 1');
 });
 
+test('concurrent reads of different stack frames each get their own variables', async (t) => {
+  const { debug, json, hitBreakpoint } = await setup(t);
+  debug.answer('get_stack_dump', debuggerFrame('stack_dump', THREAD_ID, [9, 'res://player.gd', 12, '_process', 'res://main.gd', 4, 'tick', 'res://main.gd', 2, '_ready']));
+  await hitBreakpoint();
+  debug.answer('get_stack_frame_vars', ([frame]) => [
+    debuggerFrame('stack_frame_vars', THREAD_ID, [1]),
+    debuggerFrame('stack_frame_var', THREAD_ID, ['frame', 0, 2, frame, '']),
+  ]);
+
+  const [first, second] = await Promise.all([json('get_debug_state', { frame: 1 }), json('get_debug_state', { frame: 2 })]);
+
+  assert.deepEqual(first.pause.variables, { locals: { frame: 1 }, members: {} });
+  assert.deepEqual(second.pause.variables, { locals: { frame: 2 }, members: {} });
+});
+
+test('a pause whose variables cannot be read still reports its stack', async (t) => {
+  const { debug, json } = await setup(t);
+  debug.answer('get_stack_frame_vars');
+
+  const waiting = json('get_debug_state', { waitMs: 5000 });
+  debug.send(frames.debug_enter_breakpoint);
+  const state = await waiting;
+
+  assert.deepEqual(state.pause.stack, [{ file: 'res://player.gd', line: lines.breakpoint, function: '_process' }]);
+  assert.equal(state.pause.variables, null);
+});
+
 test('evaluate returns the value in the paused frame', async (t) => {
   const { json, hitBreakpoint, messages } = await setup(t);
   await hitBreakpoint();
