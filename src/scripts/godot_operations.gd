@@ -536,10 +536,21 @@ func add_node(params):
             if debug_mode:
                 print("Setting property: " + property + " = " + str(properties[property]))
             var value = properties[property]
+            var property_type = get_property_type(new_node, property)
+            if property_type == -1:
+                printerr("Unknown property '" + property + "' on node type: " + params.node_type)
+                exit_code = 1
+                return
             if typeof(value) == TYPE_STRING and value.begins_with("res://"):
                 value = load(value)
                 if debug_mode:
                     print("Loaded resource for property: " + property + " -> " + str(value))
+            elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
+                value = dictionary_to_type(value, property_type)
+                if value == null:
+                    printerr("Cannot convert " + JSON.stringify(properties[property]) + " to " + type_string(property_type) + " for property: " + property)
+                    exit_code = 1
+                    return
             new_node.set(property, value)
     
     parent.add_child(new_node)
@@ -575,6 +586,29 @@ func add_node(params):
     else:
         printerr("Failed to pack scene: " + str(result))
         exit_code = 1
+
+# Returns the declared Variant type of a property, or -1 if the object has no such property
+func get_property_type(obj, property):
+    for p in obj.get_property_list():
+        if p.name == property:
+            return p.type
+    return -1
+
+# JSON has no vector or color types, and Node.set() silently ignores a Dictionary it cannot
+# convert, so {"x", "y"[, "z"]} and {"r", "g", "b"[, "a"]} objects are converted explicitly.
+# Returns null when the dictionary does not fit the target type.
+func dictionary_to_type(value, type):
+    match type:
+        TYPE_VECTOR2, TYPE_VECTOR2I:
+            if value.has_all(["x", "y"]):
+                return type_convert(Vector2(value.x, value.y), type)
+        TYPE_VECTOR3, TYPE_VECTOR3I:
+            if value.has_all(["x", "y", "z"]):
+                return type_convert(Vector3(value.x, value.y, value.z), type)
+        TYPE_COLOR:
+            if value.has_all(["r", "g", "b"]):
+                return Color(value.r, value.g, value.b, value.get("a", 1.0))
+    return null
 
 # Load a sprite into a Sprite2D node
 func load_sprite(params):
