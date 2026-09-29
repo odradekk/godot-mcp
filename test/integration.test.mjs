@@ -278,3 +278,72 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
   assert.equal(await readFile(join(projectPath, 'main.tscn'), 'utf8'), scene, 'the scene file must not change');
   await call(client, 'stop_project', {});
 });
+
+test('real Godot: breakpoints, stepping, evaluate and breakOnError', { skip }, async (t) => {
+  const client = await realGodot(t);
+  // The player never moves: _ready resets speed to 0 (the scenario from #17)
+  const player = [
+    'extends Node2D', //                                   1
+    '', //                                                 2
+    '@export var speed = 120.0', //                        3
+    'var velocity = Vector2.ZERO', //                      4
+    'var direction = Vector2.RIGHT', //                    5
+    '', //                                                 6
+    'func _ready():', //                                   7
+    '\tspeed = speed if speed < 100 else 0.0', //          8
+    '\tvelocity = direction * speed', //                   9
+    '', //                                                 10
+    'func _process(delta):', //                            11
+    '\tvar step = velocity * delta', //                    12
+    '\tposition += step', //                               13
+  ].join('\n') + '\n';
+  const projectPath = await makeProject(t, {
+    'project.godot': 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
+    'player.gd': player,
+    'broken.gd': 'extends Node\n\nfunc _ready():\n\tvar x = null\n\tx.foo()\n',
+    'main.tscn': '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1"]\n\n[node name="Main" type="Node"]\n\n[node name="Player" type="Node2D" parent="."]\nscript = ExtResource("1")\n',
+    'broken.tscn': '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://broken.gd" id="1"]\n\n[node name="Broken" type="Node"]\nscript = ExtResource("1")\n',
+  });
+  const json = async (name, args = {}) => {
+    const reply = await call(client, name, args);
+    return { reply, value: JSON.parse(reply.content.at(-1).text) };
+  };
+
+  await call(client, 'set_breakpoint', { file: 'player.gd', line: 12 });
+  await call(client, 'run_project', { projectPath });
+
+  const hit = (await json('get_debug_state', { waitMs: 8000 })).value;
+  assert.equal(hit.status, 'paused', JSON.stringify(hit));
+  assert.equal(hit.pause.reason, 'breakpoint');
+  assert.deepEqual(hit.pause.stack[0], { file: 'res://player.gd', line: 12, function: '_process' });
+  assert.equal(typeof hit.pause.variables.locals.delta, 'number');
+  assert.deepEqual(hit.pause.variables.members, { speed: 0, velocity: [0, 0], direction: [1, 0] });
+
+  const output = await call(client, 'get_debug_output', {});
+  assert.equal(output.content[0].text, 'Game paused at res://player.gd:12 (_process); use resume_game to continue');
+
+  assert.deepEqual((await json('evaluate', { expression: 'direction * speed' })).value.value, [0, 0]);
+
+  const stepped = (await json('resume_game', { action: 'next' })).value;
+  assert.equal(stepped.pause?.reason, 'step', JSON.stringify(stepped));
+  assert.equal(stepped.pause.stack[0].line, 13);
+  assert.deepEqual(stepped.pause.variables.locals.step, [0, 0]);
+
+  await call(client, 'set_breakpoint', { file: 'player.gd', line: 12, enabled: false });
+  assert.equal((await json('resume_game', { waitMs: 1000 })).value.status, 'running');
+
+  const paused = (await json('pause_game')).value;
+  assert.equal(paused.status, 'paused', JSON.stringify(paused));
+  assert.equal(paused.pause.reason, 'pause');
+  assert.equal((await json('resume_game', { waitMs: 500 })).value.status, 'running');
+  await call(client, 'stop_project', {});
+
+  // breakOnError pauses at the failing line; stop_project ends a paused game
+  await call(client, 'run_project', { projectPath, scene: 'broken.tscn', breakOnError: true });
+  const failed = (await json('get_debug_state', { waitMs: 8000 })).value;
+  assert.equal(failed.pause?.reason, 'error', JSON.stringify(failed));
+  assert.match(failed.pause.error, /Nonexistent function 'foo'/);
+  assert.deepEqual(failed.pause.stack[0], { file: 'res://broken.gd', line: 5, function: '_ready' });
+  const stopped = (await json('stop_project')).value;
+  assert.equal(stopped.running, false);
+});

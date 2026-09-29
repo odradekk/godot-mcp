@@ -4,7 +4,7 @@
 
 import { ChildProcess } from 'child_process';
 
-import { DebugSession, DebuggerStatus, ReportedError } from './debug-session.js';
+import { Breakpoint, DebugSession, DebuggerStatus, ReportedError } from './debug-session.js';
 import { GodotLauncher } from './godot-launcher.js';
 
 const DEFAULT_MAX_LINES = 1000;
@@ -28,7 +28,9 @@ export interface RunSnapshot {
 /**
  * Whether to attach the remote debugger to a run: its settings, or why it is not attached.
  */
-export type DebuggerSetup = { ignoreErrorBreaks: boolean; inspectObjects: boolean } | { unavailable: string };
+export type DebuggerSetup =
+  | { ignoreErrorBreaks: boolean; inspectObjects: boolean; breakOnError: boolean; breakpoints: Breakpoint[] }
+  | { unavailable: string };
 
 /**
  * Lines of one output stream. A line may arrive over several chunks; empty lines are skipped and
@@ -171,14 +173,13 @@ export class ProjectRunner {
   }
 
   /**
-   * The debug session of the running game, or why there is none to talk to
+   * The debug session of the running game, connected or not yet, or why there is none
    */
   debugSession(): DebugSession | { unavailable: string } {
     const run = this.current;
     if (!run) return { unavailable: 'No game has been started. Use run_project first.' };
     if (!run.running) return { unavailable: `The game is not running; it exited with code ${run.exitCode}. Use run_project to start it again.` };
     if (!run.session) return { unavailable: run.unattachedReason ?? 'The remote debugger is not attached' };
-    if (!run.session.isConnected) return { unavailable: 'The game has not connected to the debugger yet; try again in a moment' };
     return run.session;
   }
 
