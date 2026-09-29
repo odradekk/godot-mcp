@@ -2,9 +2,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
+import { GODOT, connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
 
-const GODOT = '/opt/godot';
 
 // Let stream data and close events reach the server
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -12,6 +11,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 async function setup(t, config = {}) {
   const launcher = fakeLauncher(godotAt(GODOT));
   const { client, close } = await connect({ godotPath: GODOT, launcher, ...config });
+  t.after(close);
   const projectPath = await makeProject(t);
   const call = (name, args = {}) => client.callTool({ name, arguments: args });
   return {
@@ -36,8 +36,7 @@ async function setup(t, config = {}) {
 }
 
 test('a line split across chunks is one line, and CRLF leaves no empty lines', async (t) => {
-  const { close, run, debugOutput } = await setup(t);
-  t.after(close);
+  const { run, debugOutput } = await setup(t);
   const game = await run();
 
   game.stdout.write('Hello, ');
@@ -48,8 +47,7 @@ test('a line split across chunks is one line, and CRLF leaves no empty lines', a
 });
 
 test('each stream keeps its most recent 1000 lines and counts the dropped ones', async (t) => {
-  const { close, run, debugOutput } = await setup(t);
-  t.after(close);
+  const { run, debugOutput } = await setup(t);
   const game = await run();
 
   game.stdout.write(Array.from({ length: 1005 }, (_, i) => `line ${i + 1}\n`).join(''));
@@ -62,8 +60,7 @@ test('each stream keeps its most recent 1000 lines and counts the dropped ones',
 });
 
 test('stop_project waits for the exit and returns the final output and exit code', async (t) => {
-  const { close, run, stop } = await setup(t);
-  t.after(close);
+  const { run, stop } = await setup(t);
   const game = await run();
   game.kill = () => {
     game.exit(1);
@@ -82,8 +79,7 @@ test('stop_project waits for the exit and returns the final output and exit code
 });
 
 test('stop_project ends a game that ignores SIGTERM with SIGKILL', async (t) => {
-  const { close, run, stop } = await setup(t, { stopTimeoutMs: 50 });
-  t.after(close);
+  const { run, stop } = await setup(t, { stopTimeoutMs: 50 });
   const game = await run();
   game.ignoredSignals = ['SIGTERM'];
 
@@ -95,8 +91,7 @@ test('stop_project ends a game that ignores SIGTERM with SIGKILL', async (t) => 
 });
 
 test('a new run ends a previous game that ignores SIGTERM with SIGKILL', async (t) => {
-  const { close, run, debugOutput } = await setup(t, { stopTimeoutMs: 50 });
-  t.after(close);
+  const { run, debugOutput } = await setup(t, { stopTimeoutMs: 50 });
   const first = await run();
   first.ignoredSignals = ['SIGTERM'];
 
@@ -110,13 +105,11 @@ test('a new run ends a previous game that ignores SIGTERM with SIGKILL', async (
 });
 
 test('a game that survives SIGKILL is reported as still running', async (t) => {
-  const { close, run, stop } = await setup(t, { stopTimeoutMs: 50 });
+  const { run, stop } = await setup(t, { stopTimeoutMs: 50 });
   const game = await run();
   game.ignoredSignals = ['SIGTERM', 'SIGKILL'];
-  t.after(async () => {
-    game.exit(null);
-    await close();
-  });
+  // Without an exit, the run's debugger listener would keep the test process alive
+  t.after(() => game.exit(null));
 
   const result = JSON.parse(text(await stop()));
 
@@ -125,8 +118,7 @@ test('a game that survives SIGKILL is reported as still running', async (t) => {
 });
 
 test('a new run replaces the running one without mixing their output', async (t) => {
-  const { close, run, debugOutput } = await setup(t);
-  t.after(close);
+  const { run, debugOutput } = await setup(t);
   const first = await run();
   first.stdout.write('from the first run\n');
 
@@ -138,8 +130,7 @@ test('a new run replaces the running one without mixing their output', async (t)
 });
 
 test('output and exit code stay readable after the game exits', async (t) => {
-  const { close, call, run, debugOutput } = await setup(t);
-  t.after(close);
+  const { call, run, debugOutput } = await setup(t);
   const game = await run();
 
   game.stdout.write('done\n');
@@ -163,9 +154,16 @@ test('closing the server stops the running game', async (t) => {
   assert.equal(game.killed, true);
 });
 
+test('get_debug_state before any run_project says to start a game', async (t) => {
+  const { call } = await setup(t);
+
+  const reply = await call('get_debug_state');
+
+  assert.equal(reply.content[0].text, 'No game has been started. Use run_project first.');
+});
+
 test('launch_editor starts the editor detached from the server', async (t) => {
-  const { close, call, launcher, projectPath } = await setup(t);
-  t.after(close);
+  const { call, launcher, projectPath } = await setup(t);
 
   await call('launch_editor', { projectPath });
 

@@ -3,49 +3,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { connect, debuggerFixtures, debuggerFrame, fakeLauncher, makeProject, text } from './harness.mjs';
+import { THREAD_ID, attach, debuggerFixtures, debuggerFrame, pollUntil, startGame } from './harness.mjs';
 
-const GODOT = '/opt/godot';
 const { frames, lines, script } = debuggerFixtures();
-const THREAD_ID = 1; // main thread ID in the recorded frames
 
-// Godot that reports `version`; the game itself is the fake launcher's child
-const godotReporting = (version) => (file, args) => {
-  if (args[0] === '--version') return { stdout: `${version}\n` };
-  throw new Error(`Unexpected Godot call: ${args.join(' ')}`);
-};
-
-async function setup(t, { version = '4.7.2.stable.official', config = {} } = {}) {
-  const launcher = fakeLauncher(godotReporting(version));
-  const { client, close } = await connect({ godotPath: GODOT, launcher, ...config });
-  t.after(close);
-  const projectPath = await makeProject(t);
-  await client.callTool({ name: 'run_project', arguments: { projectPath } });
-  const game = launcher.children.at(-1);
-  const call = async (name) => JSON.parse(text(await client.callTool({ name, arguments: {} })));
-  // Poll get_debug_output until `ready(output)` holds, for up to 2 s
+async function setup(t, options) {
+  const { game, json } = await startGame(t, options);
+  // Poll get_debug_output until `ready(output)` holds, for up to 5 s; returns the last output either way
   const debugOutputWhen = async (ready) => {
-    for (let attempt = 0; ; attempt++) {
-      const output = await call('get_debug_output');
-      if (ready(output) || attempt === 100) return output;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    let output;
+    await pollUntil(async () => ready((output = await json('get_debug_output'))));
+    return output;
   };
-  return { game, call, debugOutputWhen };
-}
-
-async function attach(game) {
-  const debug = await game.connectDebugger();
-  debug.send(frames.set_pid);
-  await debug.waitFor('set_skip_breakpoints');
-  return debug;
+  return { game, json, debugOutputWhen };
 }
 
 test('run_project attaches the debugger and tells the game not to pause', async (t) => {
-  const { game, call, debugOutputWhen } = await setup(t);
+  const { game, json, debugOutputWhen } = await setup(t);
 
   assert.match(game.args[game.args.indexOf('--remote-debug') + 1], /^tcp:\/\/127\.0\.0\.1:\d+$/);
-  assert.deepEqual((await call('get_debug_output')).debugger, { attached: false, reason: 'The game has not connected to the debugger' });
+  assert.deepEqual((await json('get_debug_output')).debugger, { attached: false, reason: 'The game has not connected to the debugger' });
 
   const debug = await attach(game);
   await debug.waitFor('set_ignore_error_breaks');
@@ -105,20 +82,20 @@ test('before Godot 4.5, the server answers every break with continue', async (t)
 });
 
 test('Godot 4.1 runs without the debugger', async (t) => {
-  const { game, call } = await setup(t, { version: '4.1.3.stable.official' });
+  const { game, json } = await setup(t, { version: '4.1.3.stable.official' });
 
   assert.ok(!game.args.includes('--remote-debug'));
-  assert.deepEqual((await call('get_debug_output')).debugger, {
+  assert.deepEqual((await json('get_debug_output')).debugger, {
     attached: false,
     reason: 'The remote debugger needs Godot 4.2 or later; this is 4.1.3.stable.official',
   });
 });
 
 test('the debugger can be turned off in the server configuration', async (t) => {
-  const { game, call } = await setup(t, { config: { remoteDebugger: false } });
+  const { game, json } = await setup(t, { config: { remoteDebugger: false } });
 
   assert.ok(!game.args.includes('--remote-debug'));
-  assert.equal((await call('get_debug_output')).debugger.reason, 'The remote debugger is turned off in the server configuration');
+  assert.equal((await json('get_debug_output')).debugger.reason, 'The remote debugger is turned off in the server configuration');
 });
 
 test('a game that never connects still has its output captured', async (t) => {
@@ -133,12 +110,12 @@ test('a game that never connects still has its output captured', async (t) => {
 });
 
 test('stop_project returns the reported errors', async (t) => {
-  const { game, call, debugOutputWhen } = await setup(t);
+  const { game, json, debugOutputWhen } = await setup(t);
   const debug = await attach(game);
   debug.send(frames.script_error_ready);
   await debugOutputWhen((output) => output.reportedErrors.length === 1);
 
-  const stopped = await call('stop_project');
+  const stopped = await json('stop_project');
 
   assert.deepEqual(stopped.debugger, { attached: true });
   assert.equal(stopped.reportedErrors.length, 1);

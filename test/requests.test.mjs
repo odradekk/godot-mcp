@@ -2,9 +2,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { GODOT_VERSION, connect, fakeLauncher, makeProject, text } from './harness.mjs';
+import { GODOT, GODOT_VERSION, connect, fakeLauncher, makeProject, text } from './harness.mjs';
 
-const GODOT = '/opt/godot';
 
 // Godot that reports `version` and answers every operation with an empty success
 function godot(version = GODOT_VERSION) {

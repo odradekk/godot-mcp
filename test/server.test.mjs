@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, normalize } from 'node:path';
+import { basename, join, normalize } from 'node:path';
 import { test } from 'node:test';
 
-import { GODOT_VERSION, connect, fakeLauncher, godotAt, text } from './harness.mjs';
+import { GODOT_VERSION, connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
 
 test('lists the Godot tools', async (t) => {
   const { client, close } = await connect({ godotPath: '/opt/godot', launcher: fakeLauncher(godotAt('/opt/godot')) });
@@ -153,4 +153,41 @@ test('get_project_info reports the name from project.godot', async (t) => {
   const info = JSON.parse(text(result));
   assert.equal(info.name, 'Demo Game');
   assert.equal(info.godotVersion, GODOT_VERSION);
+});
+
+// Paths of the projects list_projects finds in `directory`, sorted
+async function listedProjects(t, directory, recursive) {
+  const { client, close } = await connect({ godotPath: '/opt/godot', launcher: fakeLauncher(godotAt('/opt/godot')) });
+  t.after(close);
+
+  const result = await client.callTool({ name: 'list_projects', arguments: { directory, recursive } });
+
+  assert.equal(result.isError, undefined, text(result));
+  const projects = JSON.parse(text(result));
+  assert.deepEqual(projects.map(({ name }) => name), projects.map(({ path }) => basename(path)));
+  return projects.map(({ path }) => path).sort();
+}
+
+test('list_projects without recursive lists the directory and its direct subdirectories that are projects', async (t) => {
+  const root = await makeProject(t, {
+    'workspace/project.godot': '',
+    'workspace/game/project.godot': '',
+    'workspace/tools/nested/project.godot': '',
+    'workspace/assets/icon.png': '',
+  });
+  const workspace = join(root, 'workspace');
+
+  assert.deepEqual(await listedProjects(t, workspace, false), [workspace, join(workspace, 'game')].sort());
+});
+
+test('list_projects with recursive finds nested projects, skips hidden directories and does not enter projects', async (t) => {
+  const root = await makeProject(t, {
+    'workspace/game/project.godot': '',
+    'workspace/game/addons/inner/project.godot': '',
+    'workspace/tools/deep/er/project.godot': '',
+    'workspace/.cache/hidden/project.godot': '',
+  });
+  const workspace = join(root, 'workspace');
+
+  assert.deepEqual(await listedProjects(t, workspace, true), [join(workspace, 'game'), join(workspace, 'tools', 'deep', 'er')].sort());
 });

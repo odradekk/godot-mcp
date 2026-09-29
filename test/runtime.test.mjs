@@ -4,33 +4,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { connect, debuggerFixtures, fakeLauncher, makeProject, text } from './harness.mjs';
+import { GODOT, attach, connect, debuggerFixtures, fakeLauncher, godotReporting, makeProject, startGame, text } from './harness.mjs';
 import { variantToJson } from '../build/runtime-values.js';
 import { TypedVariant, decodeVariant } from '../build/variant.js';
 
-const GODOT = '/opt/godot';
 const { frames } = debuggerFixtures();
 
-const godotReporting = (version) => (file, args) => {
-  if (args[0] === '--version') return { stdout: `${version}\n` };
-  throw new Error(`Unexpected Godot call: ${args.join(' ')}`);
-};
-
 // A running game with the debugger attached; the fake game answers tree and inspect requests
-async function setup(t, { version = '4.7.2.stable.official', inspect = frames.inspect_player } = {}) {
-  const launcher = fakeLauncher(godotReporting(version));
-  const { client, close } = await connect({ godotPath: GODOT, launcher });
-  t.after(close);
-  const projectPath = await makeProject(t);
-  await client.callTool({ name: 'run_project', arguments: { projectPath } });
-  const debug = await launcher.children.at(-1).connectDebugger();
+async function setup(t, { version, inspect = frames.inspect_player } = {}) {
+  const { game, call, json } = await startGame(t, { version });
+  const debug = await attach(game);
   debug.answer('scene:request_scene_tree', frames.scene_tree);
   debug.answer('scene:inspect_objects', inspect);
   debug.answer('scene:inspect_object', frames.inspect_object_player);
-  debug.send(frames.set_pid);
-  await debug.waitFor('set_skip_breakpoints');
-  const call = (name, args = {}) => client.callTool({ name, arguments: args });
-  const json = async (name, args) => JSON.parse(text(await call(name, args)));
   return { debug, call, json };
 }
 
