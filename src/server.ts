@@ -20,11 +20,22 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
-import { Breakpoint, DebugSession, PauseState, RemoteNode, RemoteProperty, ResumeAction } from './debug-session.js';
+import { Breakpoint, DebugSession, InspectedObject, PauseState, RemoteNode, RemoteProperty, ResumeAction } from './debug-session.js';
 import { VariantType } from './variant.js';
 import { DebuggerSetup, ProjectRunner } from './godot-run.js';
 import { SETTABLE_TYPES, inferVariantType, jsonToVariant, variantToJson } from './runtime-values.js';
-import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, godotVersionAtLeast, inputSchema, prepareRequest } from './tool-requests.js';
+import {
+  Param,
+  ToolArgs,
+  ToolDefinition,
+  ToolError,
+  ToolReply,
+  errorReply,
+  godotVersionAtLeast,
+  inputSchema,
+  jsonReply,
+  prepareRequest,
+} from './tool-requests.js';
 
 // How godot_operations.gd resolves node paths; stated in every node path parameter
 const NODE_PATH_RULE = 'Node paths: "" or "root" is the scene root, and a leading "root/" is optional, so "root/Player" and "Player" are the same node.';
@@ -496,6 +507,9 @@ export class GodotServer {
         }
         return this.withPauseNote(await this.runTool(tool, prepared.args));
       } catch (error: unknown) {
+        if (error instanceof ToolError) {
+          return this.withPauseNote(errorReply(error.message, error.solutions, error.details));
+        }
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         return errorReply(`${tool.failure}: ${errorMessage}`, [
           'Ensure Godot is installed correctly',
@@ -920,37 +934,10 @@ export class GodotServer {
     return { ignoreErrorBreaks: godot45, inspectObjects: godot45, breakOnError, breakpoints: [...this.breakpoints.values()] };
   }
 
-  /**
-   * The running game's debug session, or the error reply saying why runtime tools cannot use it
-   */
-  private runtimeSession(): DebugSession | ToolReply {
-    const session = this.runner.debugSession();
-    if (session instanceof DebugSession && session.isConnected) return session;
-    const reason = session instanceof DebugSession ? 'The game has not connected to the debugger yet; try again in a moment' : session.unavailable;
-    return errorReply(reason, [
-      'Runtime tools need a game started by run_project with the remote debugger attached (Godot 4.2+)',
-      'get_debug_output shows whether the debugger is attached',
-    ]);
-  }
-
-  private missingNodeReply(session: DebugSession, path: string): ToolReply {
-    return errorReply(`No node at ${path} in the running game`, [
-      `Closest paths: ${session.nearestPaths(path).join(', ')}`,
-      'Use get_scene_tree to list the nodes',
-    ]);
-  }
-
   private async handleGetSceneTree(args: ToolArgs): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
-
+    const session = requireSession(this.runner);
     let start = await session.sceneTree();
-    if (args.path) {
-      const path = runtimePath(args.path);
-      const node = await session.findNode(path);
-      if (!node) return this.missingNodeReply(session, path);
-      start = node;
-    }
+    if (args.path) start = await requireNode(session, runtimePath(args.path));
 
     const maxNodes = args.maxNodes ?? 500;
     let listed = 0;
@@ -979,13 +966,9 @@ export class GodotServer {
   }
 
   private async handleGetNodeProperties(args: ToolArgs): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
+    const session = requireSession(this.runner);
     const path = runtimePath(args.nodePath);
-    const node = await session.findNode(path);
-    if (!node) return this.missingNodeReply(session, path);
-    const inspected = await session.inspect(node.id);
-    if (!inspected) return errorReply(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
+    const { node, inspected } = await inspectNode(session, path);
 
     const script: Record<string, unknown> = {};
     const properties: Record<string, unknown> = {};
@@ -1016,17 +999,13 @@ export class GodotServer {
   }
 
   private async handleSetNodeProperty(args: ToolArgs): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
+    const session = requireSession(this.runner);
     const path = runtimePath(args.nodePath);
-    const node = await session.findNode(path);
-    if (!node) return this.missingNodeReply(session, path);
-    const inspected = await session.inspect(node.id);
-    if (!inspected) return errorReply(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
+    const { node, inspected } = await inspectNode(session, path);
 
     const entry = inspected.properties.find((property) => listedProperty(property)?.name === args.property);
     if (!entry) {
-      return errorReply(`${path} has no property or script variable named ${args.property}`, [
+      throw new ToolError(`${path} has no property or script variable named ${args.property}`, [
         'Use get_node_properties to list its script variables and properties',
       ]);
     }
@@ -1037,7 +1016,7 @@ export class GodotServer {
       const type = entry.type !== VariantType.NIL ? entry.type : inferVariantType(entry.value, args.value);
       value = jsonToVariant(type, args.value);
     } catch (error) {
-      return errorReply(`Cannot set ${args.property}: ${error instanceof Error ? error.message : error}`);
+      throw new ToolError(`Cannot set ${args.property}: ${error instanceof Error ? error.message : error}`);
     }
     session.setProperty(node.id, entry.name, value);
 
@@ -1056,45 +1035,42 @@ export class GodotServer {
    */
   private withPauseNote(reply: ToolReply): ToolReply {
     const session = this.runner.debugSession();
-    if (!(session instanceof DebugSession) || !session.isPaused) return reply;
+    if (!session?.isPaused) return reply;
     const top = session.pause?.stack[0];
     const where = top ? ` at ${top.file}:${top.line} (${top.function})` : '';
     return { ...reply, content: [{ type: 'text', text: `Game paused${where}; use resume_game to continue` }, ...reply.content] };
   }
 
   private async handleSetBreakpoint(args: ToolArgs): Promise<ToolReply> {
-    if (!Number.isInteger(args.line) || args.line < 1) return errorReply(`line must be a positive whole number, got ${args.line}`);
+    if (!Number.isInteger(args.line) || args.line < 1) throw new ToolError(`line must be a positive whole number, got ${args.line}`);
     const breakpoint = { file: String(args.file).startsWith('res://') ? String(args.file) : `res://${args.file}`, line: args.line };
     const enabled = args.enabled !== false;
     const key = `${breakpoint.file}:${breakpoint.line}`;
     if (enabled) this.breakpoints.set(key, breakpoint);
     else this.breakpoints.delete(key);
 
-    const session = this.runner.debugSession();
-    if (session instanceof DebugSession) session.setBreakpoint(breakpoint, enabled);
+    this.runner.debugSession()?.setBreakpoint(breakpoint, enabled);
     return jsonReply({ breakpoints: [...this.breakpoints.values()] });
   }
 
   private async handlePauseGame(): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
+    const session = requireSession(this.runner);
     if (session.isPaused) return this.debugStateReply(session);
     const since = session.pauseNumber;
     session.pauseGame();
-    if (!(await session.waitForPause(since, 3000))) return errorReply('The game did not pause within 3 s');
+    if (!(await session.waitForPause(since, 3000))) throw new ToolError('The game did not pause within 3 s');
     return this.debugStateReply(session);
   }
 
   private async handleResumeGame(args: ToolArgs): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
+    const session = requireSession(this.runner);
     const action = (args.action ?? 'continue') as ResumeAction;
     if (!['continue', 'step', 'next', 'out'].includes(action)) {
-      return errorReply(`Unknown action ${action}`, ['Use continue, step, next or out']);
+      throw new ToolError(`Unknown action ${action}`, ['Use continue, step, next or out']);
     }
-    if (!session.isPaused) return errorReply('The game is not paused', ['Use pause_game, or set_breakpoint and get_debug_state with waitMs']);
+    if (!session.isPaused) throw new ToolError('The game is not paused', ['Use pause_game, or set_breakpoint and get_debug_state with waitMs']);
     if (action === 'out' && !godotVersionAtLeast(await this.getGodotVersion(), [4, 6])) {
-      return errorReply('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
+      throw new ToolError('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
     }
     const since = session.pauseNumber;
     session.resume(action);
@@ -1103,20 +1079,21 @@ export class GodotServer {
   }
 
   private async handleGetDebugState(args: ToolArgs): Promise<ToolReply> {
+    // Unlike other runtime tools, this one works before the game connects, and after it exits
     const session = this.runner.debugSession();
-    if (!(session instanceof DebugSession)) {
-      // An exited game still has a state to report
+    if (!session) {
       const run = this.runner.snapshot();
-      return run && !run.running ? jsonReply({ status: 'exited', exitCode: run.exitCode }) : this.runtimeSession() as ToolReply;
+      if (run && !run.running) return jsonReply({ status: 'exited', exitCode: run.exitCode });
+      throw sessionUnavailable(this.runner.noSessionReason());
     }
     const frame = args.frame ?? 0;
     if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, waitTime(args.waitMs, 0));
     else if (session.isPaused && !session.pause) await session.waitForPause(session.pauseNumber - 1, 3000);
     if (frame !== 0) {
       const pause = session.pause;
-      if (!pause) return errorReply('The game is not paused, so it has no stack frames to read');
+      if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');
       if (!Number.isInteger(frame) || frame < 0 || frame >= pause.stack.length) {
-        return errorReply(`frame must be between 0 and ${pause.stack.length - 1}`);
+        throw new ToolError(`frame must be between 0 and ${pause.stack.length - 1}`);
       }
       return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
     }
@@ -1124,16 +1101,15 @@ export class GodotServer {
   }
 
   private async handleEvaluate(args: ToolArgs): Promise<ToolReply> {
-    const session = this.runtimeSession();
-    if (!(session instanceof DebugSession)) return session;
-    if (!session.pause) return errorReply('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
-    if (!godotVersionAtLeast(await this.getGodotVersion(), [4, 4])) return errorReply('Evaluating expressions needs Godot 4.4 or later');
+    const session = requireSession(this.runner);
+    if (!session.pause) throw new ToolError('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
+    if (!godotVersionAtLeast(await this.getGodotVersion(), [4, 4])) throw new ToolError('Evaluating expressions needs Godot 4.4 or later');
     const frame = args.frame ?? 0;
     try {
       return jsonReply({ expression: args.expression, frame, value: await session.evaluate(String(args.expression), frame) });
     } catch (error) {
       // Godot does not answer outside a script instance's frame (e.g. in a static function)
-      return errorReply(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
+      throw new ToolError(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
         'Godot evaluates only in frames that belong to a script instance',
       ]);
     }
@@ -1351,8 +1327,39 @@ export class GodotServer {
   }
 }
 
-function jsonReply(value: unknown): ToolReply {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
+function sessionUnavailable(reason: string): ToolError {
+  return new ToolError(reason, [
+    'Runtime tools need a game started by run_project with the remote debugger attached (Godot 4.2+)',
+    'get_debug_output shows whether the debugger is attached',
+  ]);
+}
+
+/**
+ * The running game's debug session; throws why runtime tools cannot use it when it is missing or
+ * the game has not connected yet
+ */
+function requireSession(runner: ProjectRunner): DebugSession {
+  const session = runner.debugSession();
+  if (session?.isConnected) return session;
+  throw sessionUnavailable(session ? 'The game has not connected to the debugger yet; try again in a moment' : runner.noSessionReason());
+}
+
+/** The node at an absolute path in the running game; throws if there is none */
+async function requireNode(session: DebugSession, path: string): Promise<RemoteNode> {
+  const node = await session.findNode(path);
+  if (node) return node;
+  throw new ToolError(`No node at ${path} in the running game`, [
+    `Closest paths: ${session.nearestPaths(path).join(', ')}`,
+    'Use get_scene_tree to list the nodes',
+  ]);
+}
+
+/** The node at an absolute path and its properties; throws if the node does not exist */
+async function inspectNode(session: DebugSession, path: string): Promise<{ node: RemoteNode; inspected: InspectedObject }> {
+  const node = await requireNode(session, path);
+  const inspected = await session.inspect(node.id);
+  if (!inspected) throw new ToolError(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
+  return { node, inspected };
 }
 
 // Runtime node paths are absolute; the leading "/" is optional for agents

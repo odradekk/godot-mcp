@@ -58,13 +58,34 @@ export interface ToolDefinition {
   handle?(args: ToolArgs): Promise<ToolReply>;
 }
 
-export function errorReply(message: string, possibleSolutions: string[] = []): ToolReply {
+/**
+ * A failure a tool reports to the agent. The reply is the message, then the possible solutions,
+ * then `details` (e.g. Godot's output) when given.
+ */
+export class ToolError extends Error {
+  constructor(message: string, readonly solutions: string[] = [], readonly details?: string) {
+    super(message);
+  }
+}
+
+export function errorReply(message: string, possibleSolutions: string[] = [], details?: string): ToolReply {
   console.error(`[SERVER] Error response: ${message}`);
   const reply: ToolReply = { content: [{ type: 'text', text: message }], isError: true };
   if (possibleSolutions.length > 0) {
     reply.content.push({ type: 'text', text: 'Possible solutions:\n- ' + possibleSolutions.join('\n- ') });
   }
+  if (details) {
+    reply.content.push({ type: 'text', text: details });
+  }
   return reply;
+}
+
+export function textReply(text: string): ToolReply {
+  return { content: [{ type: 'text', text }] };
+}
+
+export function jsonReply(value: unknown): ToolReply {
+  return textReply(JSON.stringify(value, null, 2));
 }
 
 /**

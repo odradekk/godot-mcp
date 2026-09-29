@@ -173,14 +173,21 @@ export class ProjectRunner {
   }
 
   /**
-   * The debug session of the running game, connected or not yet, or why there is none
+   * The debug session of the running game, connected or not yet; null if there is none
    */
-  debugSession(): DebugSession | { unavailable: string } {
+  debugSession(): DebugSession | null {
     const run = this.current;
-    if (!run) return { unavailable: 'No game has been started. Use run_project first.' };
-    if (!run.running) return { unavailable: `The game is not running; it exited with code ${run.exitCode}. Use run_project to start it again.` };
-    if (!run.session) return { unavailable: run.unattachedReason ?? 'The remote debugger is not attached' };
-    return run.session;
+    return run?.running ? run.session : null;
+  }
+
+  /**
+   * Why debugSession() is null
+   */
+  noSessionReason(): string {
+    const run = this.current;
+    if (!run) return 'No game has been started. Use run_project first.';
+    if (!run.running) return `The game is not running; it exited with code ${run.exitCode}. Use run_project to start it again.`;
+    return run.unattachedReason ?? 'The remote debugger is not attached';
   }
 
   /**
