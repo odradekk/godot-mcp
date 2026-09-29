@@ -213,8 +213,8 @@ func scene_node_path(scene_root, node):
         return "root"
     return "root/" + str(scene_root.get_path_to(node))
 
-# Set properties given as JSON: res:// strings load the resource, and objects such as
-# {"x": 1, "y": 2} are converted to the property's Vector or Color type.
+# Set properties given as JSON: res:// strings load the resource for properties that take one, and
+# objects such as {"x": 1, "y": 2} are converted to the property's Vector or Color type.
 func set_node_properties(node, properties):
     for property in properties:
         var value = properties[property]
@@ -222,8 +222,11 @@ func set_node_properties(node, properties):
         if property_type == -1:
             fail("Unknown property '" + property + "' on node type: " + node.get_class())
             return false
-        if typeof(value) == TYPE_STRING and value.begins_with("res://"):
-            value = load(value)
+        if property_type == TYPE_OBJECT and typeof(value) == TYPE_STRING and value.begins_with("res://"):
+            value = load(value) if ResourceLoader.exists(value) else null
+            if value == null:
+                fail("Cannot load resource " + properties[property] + " for property: " + property)
+                return false
         elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
             value = dictionary_to_type(value, property_type)
             if value == null:
