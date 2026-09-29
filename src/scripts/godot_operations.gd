@@ -990,48 +990,19 @@ func get_uid(params):
         exit_code = 1
         return
     
-    # Check if the UID file exists
-    var uid_path = file_path + ".uid"
-    if debug_mode:
-        print("UID file path: " + uid_path)
-    
-    var uid_check = FileAccess.file_exists(uid_path)
-    if debug_mode:
-        print("UID file exists check: " + str(uid_check))
-    
-    var f = FileAccess.open(uid_path, FileAccess.READ)
-    
-    if f:
-        # Read the UID content
-        var uid_content = f.get_as_text()
-        f.close()
-        if debug_mode:
-            print("UID content read successfully")
-        
-        # Return the UID content
-        var result = {
-            "file": file_path,
-            "absolutePath": absolute_path,
-            "uid": uid_content.strip_edges(),
-            "exists": true
-        }
-        if debug_mode:
-            print("UID result: " + JSON.stringify(result))
-        print(JSON.stringify(result))
+    # Imported resources (e.g. textures) keep their UID in the .import file rather than a .uid
+    # sidecar, so ask the resource loader instead of reading files directly.
+    var uid = ResourceLoader.get_resource_uid(file_path)
+    var result = {
+        "file": file_path,
+        "absolutePath": absolute_path,
+        "exists": uid != ResourceUID.INVALID_ID
+    }
+    if result.exists:
+        result.uid = ResourceUID.id_to_text(uid)
     else:
-        if debug_mode:
-            print("UID file does not exist or could not be opened")
-        
-        # UID file doesn't exist
-        var result = {
-            "file": file_path,
-            "absolutePath": absolute_path,
-            "exists": false,
-            "message": "UID file does not exist for this file. Use resave_resources to generate UIDs."
-        }
-        if debug_mode:
-            print("UID result: " + JSON.stringify(result))
-        print(JSON.stringify(result))
+        result.message = "No UID found for this file. Use update_project_uids to generate UIDs."
+    print(JSON.stringify(result))
 
 # Resave all resources to update UID references
 func resave_resources(params):
