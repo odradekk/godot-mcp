@@ -106,8 +106,8 @@ test('UID tools require Godot 4.4', async (t) => {
     assert.equal(result.isError, true);
     assert.equal(result.content[0].text, 'Godot 4.4 or later is needed for UIDs; this is 4.3.stable.official');
   }
-  // One --version read serves both calls; no operation ran
-  assert.deepEqual(callsSinceConnect().map((call) => call.args), [['--version']]);
+  // The version read while finding Godot serves both calls; no operation ran
+  assert.deepEqual(callsSinceConnect(), []);
 });
 
 test('arguments of the wrong type, out of range or outside an enum are rejected before anything runs', async (t) => {
