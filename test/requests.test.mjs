@@ -46,6 +46,8 @@ test('each missing required parameter is reported by name before anything runs',
     texturePath: 'icon.tres',
     outputPath: 'lib.tres',
     filePath: 'main.tscn',
+    property: 'speed',
+    value: 1,
   };
   const { tools } = await client.listTools();
 

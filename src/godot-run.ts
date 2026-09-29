@@ -28,7 +28,7 @@ export interface RunSnapshot {
 /**
  * Whether to attach the remote debugger to a run: its settings, or why it is not attached.
  */
-export type DebuggerSetup = { ignoreErrorBreaks: boolean } | { unavailable: string };
+export type DebuggerSetup = { ignoreErrorBreaks: boolean; inspectObjects: boolean } | { unavailable: string };
 
 /**
  * Lines of one output stream. A line may arrive over several chunks; empty lines are skipped and
@@ -96,7 +96,7 @@ export class ProjectRunner {
     if ('unavailable' in debuggerSetup) {
       unattachedReason = debuggerSetup.unavailable;
     } else {
-      session = new DebugSession({ ignoreErrorBreaks: debuggerSetup.ignoreErrorBreaks, log: this.options.log });
+      session = new DebugSession({ ...debuggerSetup, log: this.options.log });
       try {
         const port = await session.listen();
         args = ['--remote-debug', `tcp://127.0.0.1:${port}`, ...args];
@@ -168,6 +168,18 @@ export class ProjectRunner {
       reportedErrors: run.session?.reportedErrors() ?? [],
       droppedReportedErrors: run.session?.droppedErrorReports ?? 0,
     };
+  }
+
+  /**
+   * The debug session of the running game, or why there is none to talk to
+   */
+  debugSession(): DebugSession | { unavailable: string } {
+    const run = this.current;
+    if (!run) return { unavailable: 'No game has been started. Use run_project first.' };
+    if (!run.running) return { unavailable: `The game is not running; it exited with code ${run.exitCode}. Use run_project to start it again.` };
+    if (!run.session) return { unavailable: run.unattachedReason ?? 'The remote debugger is not attached' };
+    if (!run.session.isConnected) return { unavailable: 'The game has not connected to the debugger yet; try again in a moment' };
+    return run.session;
   }
 
   /**
