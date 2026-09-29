@@ -479,13 +479,13 @@ class GodotServer {
    * @param operation The operation to execute
    * @param params The parameters for the operation
    * @param projectPath The path to the Godot project
-   * @returns The stdout and stderr from the operation
+   * @returns The stdout, stderr, and exit code of the operation
    */
   private async executeOperation(
     operation: string,
     params: OperationParams,
     projectPath: string
-  ): Promise<{ stdout: string; stderr: string }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     this.logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     this.logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
@@ -527,14 +527,16 @@ class GodotServer {
 
       const { stdout, stderr } = await execFileAsync(this.godotPath!, args);
 
-      return { stdout: stdout ?? '', stderr: stderr ?? '' };
+      return { stdout: stdout ?? '', stderr: stderr ?? '', exitCode: 0 };
     } catch (error: unknown) {
-      // If execFileAsync throws, it still contains stdout/stderr
-      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-        const execError = error as Error & { stdout: string; stderr: string };
+      // execFileAsync rejects on a non-zero exit; the error still carries the exit code and output.
+      // Spawn failures and signal kills have no numeric code and are rethrown.
+      if (error instanceof Error && typeof (error as { code?: unknown }).code === 'number') {
+        const execError = error as Error & { code: number; stdout?: string; stderr?: string };
         return {
           stdout: execError.stdout ?? '',
           stderr: execError.stderr ?? '',
+          exitCode: execError.code,
         };
       }
 
@@ -1525,9 +1527,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('create_scene', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('create_scene', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to create scene: ${stderr}`,
           [
@@ -1628,9 +1630,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('add_node', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('add_node', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to add node: ${stderr}`,
           [
@@ -1732,9 +1734,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('load_sprite', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('load_sprite', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to load sprite: ${stderr}`,
           [
@@ -1827,9 +1829,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('export_mesh_library', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('export_mesh_library', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to export mesh library: ${stderr}`,
           [
@@ -1925,9 +1927,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('save_scene', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('save_scene', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to save scene: ${stderr}`,
           [
@@ -2036,9 +2038,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('get_uid', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('get_uid', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to get UID: ${stderr}`,
           [
@@ -2136,9 +2138,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('resave_resources', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('resave_resources', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to update project UIDs: ${stderr}`,
           [
