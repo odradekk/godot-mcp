@@ -30,11 +30,22 @@ export interface ToolReply {
  */
 export type Check = 'project' | 'directory' | 'projectFile' | 'existingFile' | 'className';
 
+/**
+ * A tool parameter. Request preparation checks the type, enum and bounds, and fills in the default;
+ * all but `check`, `label` and `hint` are listed in the input schema as they are.
+ */
 export interface Param {
   /** 'any' lists no type in the schema, for parameters that take any JSON value */
-  type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'any';
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'any';
   description: string;
-  items?: { type: string };
+  items?: { type: 'string' };
+  /** Value used when the argument is missing */
+  default?: unknown;
+  /** Allowed values of a string parameter */
+  enum?: string[];
+  /** Bounds of a number or integer parameter */
+  minimum?: number;
+  maximum?: number;
   check?: Check;
   /** For existingFile: what the file is, used in the "does not exist" message. Defaults to "File". */
   label?: string;
@@ -113,10 +124,7 @@ export function jsonReply(value: unknown): ToolReply {
  */
 export function inputSchema(tool: ToolDefinition) {
   const properties = Object.fromEntries(
-    Object.entries(tool.params).map(([name, { type, items, description }]) => [
-      name,
-      type === 'any' ? { description } : items ? { type, items, description } : { type, description },
-    ])
+    Object.entries(tool.params).map(([name, { check, label, hint, type, ...schema }]) => [name, type === 'any' ? schema : { type, ...schema }])
   );
   return { type: 'object' as const, properties, required: tool.required };
 }
@@ -143,6 +151,15 @@ export async function prepareRequest(
   const missing = tool.required.filter((name) => args[name] === undefined || (args[name] === '' && tool.params[name].type === 'string'));
   if (missing.length > 0) {
     return { error: errorReply(`Missing required parameters: ${missing.join(', ')}`, [`Provide ${tool.required.join(', ')}`]) };
+  }
+
+  for (const [name, param] of Object.entries(tool.params)) {
+    if (args[name] === undefined) {
+      if (param.default !== undefined) args[name] = param.default;
+    } else if (!fits(param, args[name])) {
+      const expected = accepted(param);
+      return { error: errorReply(`Invalid ${name}: expected ${expected}, got ${JSON.stringify(args[name])}`, [`Provide ${name} as ${expected}`]) };
+    }
   }
 
   const checked = Object.entries(tool.params).filter(([name, param]) => param.check && args[name] !== undefined);
@@ -189,7 +206,7 @@ export async function prepareRequest(
     const { version: [major, minor], feature, solutions } = tool.minGodot;
     const version = await godotVersion();
     if (!godotVersionAtLeast(version, [major, minor])) {
-      return { error: errorReply(`${feature} are only supported in Godot ${major}.${minor} or later. Current version: ${version}`, solutions) };
+      return { error: errorReply(`Godot ${major}.${minor} or later is needed for ${feature}; this is ${version}`, solutions) };
     }
   }
 
@@ -202,6 +219,49 @@ export async function prepareRequest(
 export function godotVersionAtLeast(version: string, [major, minor]: [number, number]): boolean {
   const match = version.match(/^(\d+)\.(\d+)/);
   return match !== null && (Number(match[1]) > major || (Number(match[1]) === major && Number(match[2]) >= minor));
+}
+
+/** Whether a value has the parameter's type, and is within its enum and bounds */
+function fits(param: Param, value: unknown): boolean {
+  const { type, items, enum: values, minimum = -Infinity, maximum = Infinity } = param;
+  switch (type) {
+    case 'string':
+      return typeof value === 'string' && (!values || values.includes(value));
+    case 'number':
+    case 'integer':
+      return (
+        typeof value === 'number' &&
+        (type === 'integer' ? Number.isInteger(value) : Number.isFinite(value)) &&
+        value >= minimum &&
+        value <= maximum
+      );
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value) && (!items || value.every((item) => typeof item === items.type));
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value);
+    case 'any':
+      return true;
+  }
+}
+
+/** What a parameter accepts, e.g. "an integer from 0 to 60000" or "one of continue, step" */
+function accepted({ type, items, enum: values, minimum, maximum }: Param): string {
+  if (values) return `one of ${values.join(', ')}`;
+  const kind = {
+    string: 'a string',
+    number: 'a number',
+    integer: 'an integer',
+    boolean: 'true or false',
+    array: items ? `an array of ${items.type}s` : 'an array',
+    object: 'an object',
+    any: 'any value',
+  }[type];
+  if (minimum !== undefined && maximum !== undefined) return `${kind} from ${minimum} to ${maximum}`;
+  if (minimum !== undefined) return `${kind} of at least ${minimum}`;
+  if (maximum !== undefined) return `${kind} of at most ${maximum}`;
+  return kind;
 }
 
 function snakeCase(name: string): string {

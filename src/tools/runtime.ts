@@ -28,7 +28,7 @@ export function runtimeTools(ctx: ToolContext): ToolDefinition[] {
         'its script (a script with class_name shows as the type)',
       params: {
         path: { type: 'string', description: `Optional: list only this subtree. ${RUNTIME_PATH_RULE}` },
-        maxNodes: { type: 'number', description: 'Maximum number of nodes to list (default: 500)' },
+        maxNodes: { type: 'integer', description: 'Maximum number of nodes to list (default: 500)', minimum: 1, default: 500 },
       },
       required: [],
       failure: 'Failed to get the scene tree',
@@ -37,7 +37,7 @@ export function runtimeTools(ctx: ToolContext): ToolDefinition[] {
         let start = await session.sceneTree();
         if (args.path) start = await requireNode(session, runtimePath(args.path));
 
-        const maxNodes = args.maxNodes ?? 500;
+        const maxNodes: number = args.maxNodes;
         let listed = 0;
         let omitted = 0;
         const toJson = (node: RemoteNode): object | null => {
@@ -91,8 +91,8 @@ export function runtimeTools(ctx: ToolContext): ToolDefinition[] {
         }
 
         let unknownNames: string[] = [];
-        if (Array.isArray(args.names)) {
-          const wanted = new Set(args.names.map(String));
+        if (args.names) {
+          const wanted = new Set<string>(args.names);
           unknownNames = [...wanted].filter((name) => !(name in script) && !(name in properties));
           for (const section of [script, properties]) {
             for (const name of Object.keys(section)) if (!wanted.has(name)) delete section[name];

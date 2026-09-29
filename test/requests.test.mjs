@@ -104,10 +104,41 @@ test('UID tools require Godot 4.4', async (t) => {
 
   for (const result of [uid, update]) {
     assert.equal(result.isError, true);
-    assert.equal(result.content[0].text, 'UIDs are only supported in Godot 4.4 or later. Current version: 4.3.stable.official');
+    assert.equal(result.content[0].text, 'Godot 4.4 or later is needed for UIDs; this is 4.3.stable.official');
   }
   // One --version read serves both calls; no operation ran
   assert.deepEqual(callsSinceConnect().map((call) => call.args), [['--version']]);
+});
+
+test('arguments of the wrong type, out of range or outside an enum are rejected before anything runs', async (t) => {
+  const { client, projectPath, callsSinceConnect } = await setup(t);
+  const cases = [
+    ['set_breakpoint', { file: 'player.gd', line: '12' }, 'Invalid line: expected an integer of at least 1, got "12"'],
+    ['set_breakpoint', { file: 'player.gd', line: 0 }, 'Invalid line: expected an integer of at least 1, got 0'],
+    ['resume_game', { action: 'jump' }, 'Invalid action: expected one of continue, step, next, out, got "jump"'],
+    ['get_debug_state', { waitMs: 70000 }, 'Invalid waitMs: expected a number from 0 to 60000, got 70000'],
+    ['list_projects', { directory: projectPath, recursive: 'true' }, 'Invalid recursive: expected true or false, got "true"'],
+    ['get_node_properties', { nodePath: '/root', names: [1] }, 'Invalid names: expected an array of strings, got [1]'],
+  ];
+
+  for (const [name, args, message] of cases) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, name);
+    assert.equal(result.content[0].text, message);
+  }
+  assert.deepEqual(callsSinceConnect(), []);
+});
+
+test('the input schema lists types, defaults, enums and bounds', async (t) => {
+  const { client } = await setup(t);
+  const { tools } = await client.listTools();
+  const schema = (name) => tools.find((tool) => tool.name === name).inputSchema.properties;
+
+  const { action, waitMs } = schema('resume_game');
+  assert.deepEqual([action.enum, action.default], [['continue', 'step', 'next', 'out'], 'continue']);
+  assert.deepEqual([waitMs.type, waitMs.minimum, waitMs.maximum, waitMs.default], ['number', 0, 60000, 5000]);
+  assert.deepEqual([schema('set_breakpoint').line.type, schema('set_breakpoint').line.minimum], ['integer', 1]);
+  assert.equal(schema('set_node_property').value.type, undefined);
 });
 
 test('snake_case names are accepted and Godot receives camelCase', async (t) => {

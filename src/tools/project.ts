@@ -40,13 +40,13 @@ export function projectTools(ctx: ToolContext): ToolDefinition[] {
       description: 'List Godot projects in a directory',
       params: {
         directory: { type: 'string', description: 'Directory to search for Godot projects', check: 'directory' },
-        recursive: { type: 'boolean', description: 'Whether to search recursively (default: false)' },
+        recursive: { type: 'boolean', description: 'Whether to search recursively (default: false)', default: false },
       },
       required: ['directory'],
       failure: 'Failed to list projects',
       handle: async (args) => {
         ctx.log(`Listing Godot projects in directory: ${args.directory}`);
-        return jsonReply(findGodotProjects(ctx, args.directory, args.recursive === true));
+        return jsonReply(findGodotProjects(ctx, args.directory, args.recursive));
       },
     },
     {
