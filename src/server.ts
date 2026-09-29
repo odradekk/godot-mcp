@@ -80,7 +80,7 @@ export class GodotServer {
    */
   async connect(transport: Transport) {
     const log = (message: string) => this.logDebug(message);
-    const godotPath = await findGodot({
+    const { path: godotPath, version } = await findGodot({
       configured: this.config.godotPath,
       env: this.env,
       platform: this.config.platform ?? process.platform,
@@ -90,15 +90,10 @@ export class GodotServer {
     });
     console.error(`[SERVER] Using Godot at: ${godotPath}`);
 
-    let version: Promise<string> | null = null;
     const ctx: ToolContext = {
       godotPath,
-      // Read once per server; a failed read is retried
-      godotVersion: () =>
-        (version ??= readGodotVersion(this.launcher, godotPath).catch((error) => {
-          version = null;
-          throw error;
-        })),
+      // Only the fallback path, where no Godot ran, has no version yet
+      godotVersion: version !== null ? async () => version : () => readGodotVersion(this.launcher, godotPath),
       launcher: this.launcher,
       runner: this.runner,
       breakpoints: new Map(),
