@@ -18,24 +18,50 @@ export const GODOT_VERSION = '4.7.2.stable.official';
  */
 export function fakeLauncher(respond) {
   const calls = [];
+  const children = [];
   return {
     calls,
+    children,
     async run(file, args, options) {
       calls.push({ file, args, options });
       return { stdout: '', stderr: '', exitCode: 0, ...(await respond(file, args)) };
     },
-    start(file, args) {
-      calls.push({ file, args });
-      const child = new EventEmitter();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      child.kill = () => {
-        child.emit('exit', null);
-        return true;
-      };
+    start(file, args, options) {
+      calls.push({ file, args, options });
+      const child = fakeChild();
+      children.push(child);
       return child;
     },
   };
+}
+
+/**
+ * A child process driven by the test: write to child.stdout and child.stderr, and end it with
+ * child.exit(code). kill() exits with code null unless child.ignoreKill is set.
+ */
+function fakeChild() {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.ignoreKill = false;
+  child.exit = (code) => {
+    // Like a real process, 'close' follows once both streams have been read to the end
+    let open = 2;
+    const ended = () => {
+      if (--open === 0) child.emit('close', code);
+    };
+    child.stdout.on('end', ended);
+    child.stderr.on('end', ended);
+    child.stdout.end();
+    child.stderr.end();
+  };
+  child.kill = () => {
+    child.killed = true;
+    if (!child.ignoreKill) child.exit(null);
+    return true;
+  };
+  return child;
 }
 
 /**

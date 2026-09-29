@@ -20,6 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
+import { ProjectRunner } from './godot-run.js';
 import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, inputSchema, prepareRequest } from './tool-requests.js';
 
 // How godot_operations.gd resolves node paths; stated in every node path parameter
@@ -75,18 +76,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
- * Interface representing a Godot process started by run_project.
- * The record is kept after the process exits so its output can still be read.
- */
-interface GodotProcess {
-  process: any;
-  output: string[];
-  errors: string[];
-  running: boolean;
-  exitCode: number | null;
-}
-
-/**
  * Interface for server configuration
  */
 export interface GodotServerConfig {
@@ -102,6 +91,8 @@ export interface GodotServerConfig {
   launcher?: GodotLauncher;
   /** Time limit for one Godot operation or import, in milliseconds. Defaults to 5 minutes. */
   operationTimeoutMs?: number;
+  /** How long stop_project and shutdown wait for the game to exit after killing it, in milliseconds. Defaults to 5 seconds. */
+  stopTimeoutMs?: number;
 }
 
 /**
@@ -109,7 +100,7 @@ export interface GodotServerConfig {
  */
 export class GodotServer {
   private server: Server;
-  private activeProcess: GodotProcess | null = null;
+  private runner: ProjectRunner;
   private godotPath: string | null = null;
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
@@ -128,6 +119,10 @@ export class GodotServer {
     this.debugMode = config.debugMode ?? this.env.DEBUG === 'true';
     this.strictPathValidation = config.strictPathValidation ?? false;
     this.operationTimeoutMs = config.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.runner = new ProjectRunner(this.launcher, {
+      stopTimeoutMs: config.stopTimeoutMs,
+      log: (message) => this.logDebug(message),
+    });
 
     // Validated with --version when the server connects; an invalid path falls back to detection
     if (config.godotPath) {
@@ -291,11 +286,7 @@ export class GodotServer {
    */
   async close() {
     this.logDebug('Cleaning up resources');
-    if (this.activeProcess) {
-      this.logDebug('Killing active Godot process');
-      this.activeProcess.process.kill();
-      this.activeProcess = null;
-    }
+    await this.runner.stop();
     await this.server.close();
   }
 
@@ -741,7 +732,8 @@ export class GodotServer {
 
   private async handleLaunchEditor(args: ToolArgs): Promise<ToolReply> {
     this.logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-    const process = this.launcher.start(this.godotPath!, ['-e', '--path', args.projectPath]);
+    // Detached: the editor belongs to the user and keeps running after this server exits
+    const process = this.launcher.start(this.godotPath!, ['-e', '--path', args.projectPath], { detached: true });
 
     process.on('error', (err: Error) => {
       console.error('Failed to start Godot editor:', err);
@@ -753,52 +745,13 @@ export class GodotServer {
   }
 
   private async handleRunProject(args: ToolArgs): Promise<ToolReply> {
-    // Kill any existing process
-    if (this.activeProcess?.running) {
-      this.logDebug('Killing existing Godot process before starting a new one');
-      this.activeProcess.process.kill();
-    }
-
     const cmdArgs = ['-d', '--path', args.projectPath];
     if (args.scene) {
-      this.logDebug(`Adding scene parameter: ${args.scene}`);
       cmdArgs.push(args.scene);
     }
 
-    this.logDebug(`Running Godot project: ${args.projectPath}`);
-    const process = this.launcher.start(this.godotPath!, cmdArgs);
-    const run: GodotProcess = { process, output: [], errors: [], running: true, exitCode: null };
-    const { output, errors } = run;
-
-    process.stdout?.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      output.push(...lines);
-      lines.forEach((line: string) => {
-        if (line.trim()) this.logDebug(`[Godot stdout] ${line}`);
-      });
-    });
-
-    process.stderr?.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      errors.push(...lines);
-      lines.forEach((line: string) => {
-        if (line.trim()) this.logDebug(`[Godot stderr] ${line}`);
-      });
-    });
-
-    process.on('exit', (code: number | null) => {
-      this.logDebug(`Godot process exited with code ${code}`);
-      run.running = false;
-      run.exitCode = code;
-    });
-
-    process.on('error', (err: Error) => {
-      console.error('Failed to start Godot process:', err);
-      run.running = false;
-      errors.push(err.message);
-    });
-
-    this.activeProcess = run;
+    this.logDebug(`Running Godot project: ${cmdArgs.join(' ')}`);
+    await this.runner.start(this.godotPath!, cmdArgs);
 
     return {
       content: [{ type: 'text', text: `Godot project started in debug mode. Use get_debug_output to see output.` }],
@@ -806,49 +759,38 @@ export class GodotServer {
   }
 
   private async handleGetDebugOutput(): Promise<ToolReply> {
-    if (!this.activeProcess) {
+    const run = this.runner.snapshot();
+    if (!run) {
       return errorReply('No Godot process has been started.', ['Use run_project to start a Godot project first']);
     }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              running: this.activeProcess.running,
-              exitCode: this.activeProcess.exitCode,
-              output: this.activeProcess.output,
-              errors: this.activeProcess.errors,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
+    return { content: [{ type: 'text', text: JSON.stringify(run, null, 2) }] };
   }
 
   private async handleStopProject(): Promise<ToolReply> {
-    if (!this.activeProcess?.running) {
+    const run = await this.runner.stop();
+    if (!run) {
       return errorReply('No running Godot process to stop.', [
         'Use run_project to start a Godot project first',
         'The process may have already terminated; use get_debug_output to read its output',
       ]);
     }
 
-    this.logDebug('Stopping active Godot process');
-    this.activeProcess.process.kill();
-
+    const message = run.running
+      ? `Godot project was killed but did not exit within ${this.runner.stopTimeoutMs / 1000} s`
+      : 'Godot project stopped';
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify(
             {
-              message: 'Godot project stopped',
-              finalOutput: this.activeProcess.output,
-              finalErrors: this.activeProcess.errors,
+              message,
+              running: run.running,
+              exitCode: run.exitCode,
+              finalOutput: run.output,
+              finalErrors: run.errors,
+              droppedOutputLines: run.droppedOutputLines,
+              droppedErrorLines: run.droppedErrorLines,
             },
             null,
             2

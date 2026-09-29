@@ -9,10 +9,18 @@ import { GodotServer } from './server.js';
 
 const server = new GodotServer();
 
-process.on('SIGINT', async () => {
+// Stop the running game and exit, however the client ends the session
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   await server.close();
   process.exit(0);
-});
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+// The SDK's stdio transport does not report the client closing stdin
+process.stdin.on('end', shutdown);
 
 try {
   await server.connect(new StdioServerTransport());

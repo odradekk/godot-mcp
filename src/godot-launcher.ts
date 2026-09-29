@@ -17,9 +17,10 @@ export interface GodotLauncher {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
   /**
-   * Start a long-running process with piped stdio.
+   * Start a long-running process with piped stdio. With `detached`, the process gets no stdio and
+   * its own process group, and keeps running after this server exits.
    */
-  start(file: string, args: string[]): ChildProcess;
+  start(file: string, args: string[], options?: { detached?: boolean }): ChildProcess;
 }
 
 export const nodeLauncher: GodotLauncher = {
@@ -45,7 +46,13 @@ export const nodeLauncher: GodotLauncher = {
     });
   },
 
-  start(file, args) {
+  start(file, args, options = {}) {
+    if (options.detached) {
+      // Without detached, Windows ends the child when this process exits (libuv's job object)
+      const child = spawn(file, args, { detached: true, stdio: 'ignore' });
+      child.unref();
+      return child;
+    }
     return spawn(file, args, { stdio: 'pipe' });
   },
 };
