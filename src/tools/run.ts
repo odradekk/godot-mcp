@@ -54,26 +54,19 @@ export function runTools(ctx: ToolContext): ToolDefinition[] {
       required: [],
       failure: 'Failed to stop Godot project',
       handle: async () => {
-        const run = await ctx.runner.stop();
-        if (!run) {
+        const snapshot = await ctx.runner.stop();
+        if (!snapshot) {
           throw new ToolError('No running Godot process to stop.', [
             'Use run_project to start a Godot project first',
             'The process may have already terminated; use get_debug_output to read its output',
           ]);
         }
         const seconds = ctx.runner.stopTimeoutMs / 1000;
-        return jsonReply({
-          message: run.running ? `Godot project did not exit within ${seconds} s of SIGTERM or ${seconds} s of SIGKILL` : 'Godot project stopped',
-          running: run.running,
-          exitCode: run.exitCode,
-          finalOutput: run.output,
-          finalErrors: run.errors,
-          droppedOutputLines: run.droppedOutputLines,
-          droppedErrorLines: run.droppedErrorLines,
-          debugger: run.debugger,
-          reportedErrors: run.reportedErrors,
-          droppedReportedErrors: run.droppedReportedErrors,
-        });
+        const { output: finalOutput, errors: finalErrors, ...run } = snapshot;
+        const message = run.running
+          ? `Godot project did not exit within ${seconds} s of SIGTERM or ${seconds} s of SIGKILL`
+          : 'Godot project stopped';
+        return jsonReply({ message, ...run, finalOutput, finalErrors });
       },
     },
   ];
