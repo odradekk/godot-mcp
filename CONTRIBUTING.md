@@ -49,7 +49,8 @@ By participating in this project, you agree to maintain a respectful and inclusi
 godot-mcp/
 ├── src/             # Source code
 │   ├── index.ts     # Entry point: serves over stdio
-│   ├── server.ts    # MCP server and tool handlers
+│   ├── server.ts    # MCP server: tool table and handlers
+│   ├── tool-requests.ts   # Tool schemas and request checks, from each tool's declaration
 │   ├── godot-launcher.ts  # Starts Godot processes (replaced by a fake in tests)
 │   └── scripts/     # GDScript run by Godot for scene operations
 ├── build/           # Compiled JavaScript (generated)

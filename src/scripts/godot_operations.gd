@@ -179,15 +179,15 @@ func instantiate_class(name_of_class):
 # Create a new scene with a specified root node type
 func create_scene(params):
     # Normalize the scene path
-    var full_scene_path = params.scene_path
+    var full_scene_path = params.scenePath
     if not full_scene_path.begins_with("res://"):
         full_scene_path = "res://" + full_scene_path
     var absolute_scene_path = ProjectSettings.globalize_path(full_scene_path)
     log_debug("Scene path: " + full_scene_path + " (" + absolute_scene_path + ")")
     
     var root_node_type = "Node2D"  # Default value
-    if params.has("root_node_type"):
-        root_node_type = params.root_node_type
+    if params.has("rootNodeType"):
+        root_node_type = params.rootNodeType
     
     # Create the root node
     var scene_root = instantiate_class(root_node_type)
@@ -220,9 +220,9 @@ func create_scene(params):
 
 # Add a node to an existing scene
 func add_node(params):
-    print("Adding node to scene: " + params.scene_path)
+    print("Adding node to scene: " + params.scenePath)
     
-    var full_scene_path = params.scene_path
+    var full_scene_path = params.scenePath
     if not full_scene_path.begins_with("res://"):
         full_scene_path = "res://" + full_scene_path
     if debug_mode:
@@ -247,8 +247,8 @@ func add_node(params):
     
     # Use traditional if-else statement for better compatibility
     var parent_path = "root"  # Default value
-    if params.has("parent_node_path"):
-        parent_path = params.parent_node_path
+    if params.has("parentNodePath"):
+        parent_path = params.parentNodePath
     if debug_mode:
         print("Parent path: " + parent_path)
     
@@ -261,11 +261,11 @@ func add_node(params):
         print("Parent node found: " + parent.name)
     
     if debug_mode:
-        print("Instantiating node of type: " + params.node_type)
-    var new_node = instantiate_class(params.node_type)
+        print("Instantiating node of type: " + params.nodeType)
+    var new_node = instantiate_class(params.nodeType)
     if not new_node:
-        return fail("Failed to instantiate node of type: " + params.node_type + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
-    new_node.name = params.node_name
+        return fail("Failed to instantiate node of type: " + params.nodeType + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
+    new_node.name = params.nodeName
     if debug_mode:
         print("New node created with name: " + new_node.name)
     
@@ -279,7 +279,7 @@ func add_node(params):
             var value = properties[property]
             var property_type = get_property_type(new_node, property)
             if property_type == -1:
-                return fail("Unknown property '" + property + "' on node type: " + params.node_type)
+                return fail("Unknown property '" + property + "' on node type: " + params.nodeType)
             if typeof(value) == TYPE_STRING and value.begins_with("res://"):
                 value = load(value)
                 if debug_mode:
@@ -306,7 +306,7 @@ func add_node(params):
     ok({
         "scenePath": full_scene_path,
         "nodePath": scene_node_path(scene_root, new_node),
-        "nodeType": params.node_type,
+        "nodeType": params.nodeType,
     })
 
 # Path of `node` in the "root/..." form the tools accept
@@ -340,10 +340,10 @@ func dictionary_to_type(value, type):
 
 # Load a sprite into a Sprite2D node
 func load_sprite(params):
-    print("Loading sprite into scene: " + params.scene_path)
+    print("Loading sprite into scene: " + params.scenePath)
     
     # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scene_path
+    var full_scene_path = params.scenePath
     if not full_scene_path.begins_with("res://"):
         full_scene_path = "res://" + full_scene_path
     
@@ -359,7 +359,7 @@ func load_sprite(params):
         return fail("Scene file does not exist at: " + full_scene_path)
     
     # Ensure the texture path starts with res:// for Godot's resource system
-    var full_texture_path = params.texture_path
+    var full_texture_path = params.texturePath
     if not full_texture_path.begins_with("res://"):
         full_texture_path = "res://" + full_texture_path
     
@@ -380,7 +380,7 @@ func load_sprite(params):
         print("Scene instantiated")
     
     # Find the sprite node
-    var node_path = params.node_path
+    var node_path = params.nodePath
     if debug_mode:
         print("Original node path: " + node_path)
     
@@ -401,7 +401,7 @@ func load_sprite(params):
             print("Found sprite node: " + sprite_node.name)
     
     if not sprite_node:
-        return fail("Node not found: " + params.node_path)
+        return fail("Node not found: " + params.nodePath)
     
     # Check if the node is a Sprite2D or compatible type
     if debug_mode:
@@ -446,10 +446,10 @@ func load_sprite(params):
 
 # Export a scene as a MeshLibrary resource
 func export_mesh_library(params):
-    print("Exporting MeshLibrary from scene: " + params.scene_path)
+    print("Exporting MeshLibrary from scene: " + params.scenePath)
     
     # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scene_path
+    var full_scene_path = params.scenePath
     if not full_scene_path.begins_with("res://"):
         full_scene_path = "res://" + full_scene_path
     
@@ -457,7 +457,7 @@ func export_mesh_library(params):
         print("Full scene path (with res://): " + full_scene_path)
     
     # Ensure the output path starts with res:// for Godot's resource system
-    var full_output_path = params.output_path
+    var full_output_path = params.outputPath
     if not full_output_path.begins_with("res://"):
         full_output_path = "res://" + full_output_path
     
@@ -493,7 +493,7 @@ func export_mesh_library(params):
         print("Created new MeshLibrary")
     
     # Get mesh item names if provided
-    var mesh_item_names = params.mesh_item_names if params.has("mesh_item_names") else []
+    var mesh_item_names = params.meshItemNames if params.has("meshItemNames") else []
     var use_specific_items = mesh_item_names.size() > 0
     
     if debug_mode:
@@ -623,11 +623,11 @@ func find_files(path, extension, problems):
 
 # Get UID for a specific file
 func get_uid(params):
-    if not params.has("file_path"):
+    if not params.has("filePath"):
         return fail("File path is required")
     
     # Ensure the file path starts with res:// for Godot's resource system
-    var file_path = params.file_path
+    var file_path = params.filePath
     if not file_path.begins_with("res://"):
         file_path = "res://" + file_path
     
@@ -668,8 +668,8 @@ func resave_resources(params):
     
     # Get project path if provided
     var project_path = "res://"
-    if params.has("project_path"):
-        project_path = params.project_path
+    if params.has("projectPath"):
+        project_path = params.projectPath
         if not project_path.begins_with("res://"):
             project_path = "res://" + project_path
         if not project_path.ends_with("/"):
@@ -754,10 +754,10 @@ func resave_resources(params):
 
 # Save changes to a scene file
 func save_scene(params):
-    print("Saving scene: " + params.scene_path)
+    print("Saving scene: " + params.scenePath)
     
     # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scene_path
+    var full_scene_path = params.scenePath
     if not full_scene_path.begins_with("res://"):
         full_scene_path = "res://" + full_scene_path
     
@@ -786,15 +786,15 @@ func save_scene(params):
         print("Scene instantiated")
     
     # Determine save path
-    var save_path = params.new_path if params.has("new_path") else full_scene_path
-    if params.has("new_path") and not save_path.begins_with("res://"):
+    var save_path = params.newPath if params.has("newPath") else full_scene_path
+    if params.has("newPath") and not save_path.begins_with("res://"):
         save_path = "res://" + save_path
     
     if debug_mode:
         print("Save path: " + save_path)
     
     # Create directory if it doesn't exist
-    if params.has("new_path"):
+    if params.has("newPath"):
         var dir = DirAccess.open("res://")
         if dir == null:
             return fail("Failed to open res:// directory, error: " + str(DirAccess.get_open_error()))
