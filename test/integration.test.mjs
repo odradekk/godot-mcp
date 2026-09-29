@@ -103,6 +103,24 @@ test('real Godot: scene operations report results and failures', { skip }, async
   assert.match(noMeshes.content[0].text, /^Failed to export mesh library: No valid meshes found in the scene/);
 });
 
+test('real Godot: add_node loads res:// strings only for properties that take a resource', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const projectPath = await makeProject(t);
+  await call(client, 'create_scene', { projectPath, scenePath: 'main.tscn' });
+
+  const label = await call(client, 'add_node', {
+    projectPath, scenePath: 'main.tscn', nodeType: 'Label', nodeName: 'Next', properties: { text: 'res://levels/2.tscn' },
+  });
+  assert.equal(label.isError, undefined, text(label));
+  assert.match(await readFile(join(projectPath, 'main.tscn'), 'utf8'), /text = "res:\/\/levels\/2\.tscn"/);
+
+  const missing = await call(client, 'add_node', {
+    projectPath, scenePath: 'main.tscn', nodeType: 'MeshInstance3D', nodeName: 'Box', properties: { mesh: 'res://missing.tres' },
+  });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.content[0].text, 'Failed to add node: Cannot load resource res://missing.tres for property: mesh');
+});
+
 test('real Godot: UID tools', { skip }, async (t) => {
   const client = await realGodot(t);
   const projectPath = await makeProject(t, { 'player.gd': 'extends Node\n' });
