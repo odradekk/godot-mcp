@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { test } from 'node:test';
@@ -37,6 +37,14 @@ test('lists the Godot tools', async (t) => {
     'stop_project',
     'update_project_uids',
   ]);
+});
+
+test('the server reports the package version', async (t) => {
+  const { client, close } = await connect({ godotPath: '/opt/godot', launcher: fakeLauncher(godotAt('/opt/godot')) });
+  t.after(close);
+  const { version } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+
+  assert.equal(client.getServerVersion().version, version);
 });
 
 test('get_godot_version returns the version Godot reports', async (t) => {

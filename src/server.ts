@@ -6,6 +6,8 @@
  * capture debug output, and control project execution.
  */
 
+import { readFileSync } from 'fs';
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -26,6 +28,8 @@ import { runtimeTools } from './tools/runtime.js';
 import { sceneTools } from './tools/scene.js';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+// package.json sits next to the build directory, in the repository and in the published package
+const { version: PACKAGE_VERSION } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 export interface GodotServerConfig {
   /** Godot executable to try first; an invalid path falls back to detection. */
@@ -69,7 +73,7 @@ export class GodotServer {
       stopTimeoutMs: config.stopTimeoutMs,
       log: (message) => this.logDebug(message),
     });
-    this.server = new Server({ name: 'godot-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
+    this.server = new Server({ name: 'godot-mcp', version: PACKAGE_VERSION }, { capabilities: { tools: {} } });
     this.server.onerror = (error) => console.error('[MCP Error]', error);
   }
 
