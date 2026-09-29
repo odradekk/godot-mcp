@@ -231,3 +231,50 @@ test('real Godot: the remote debugger reports each distinct error once, with its
   assert.deepEqual(find("'bar'").map(({ line }) => line), [14]);
   assert.ok(find("'bar'")[0].count > 100, `per-frame error count: ${find("'bar'")[0].count}`);
 });
+
+test('real Godot: inspect and change a running node', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const scene = [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://player.gd" id="1"]',
+    '',
+    '[node name="Main" type="Node"]',
+    '',
+    '[node name="Player" type="Node2D" parent="."]',
+    'script = ExtResource("1")',
+  ].join('\n') + '\n';
+  const projectPath = await makeProject(t, {
+    'project.godot': 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n\n[autoload]\n\nScore="*res://score.gd"\n',
+    'score.gd': 'extends Node\n\nvar points = 0\n',
+    'player.gd': 'extends Node2D\n\n@export var speed = 0.0\nvar velocity = Vector2.ZERO\n\nfunc _process(delta):\n\tposition += velocity * delta\n',
+    'main.tscn': scene,
+  });
+
+  await call(client, 'run_project', { projectPath });
+  // The game connects to the debugger before its main scene is loaded, so wait for the scene too
+  let tree;
+  for (let attempt = 0; attempt < 50 && !tree?.children?.some((node) => node.name === 'Main'); attempt++) {
+    const reply = await call(client, 'get_scene_tree', {});
+    if (!reply.isError) tree = JSON.parse(text(reply)).tree;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.ok(tree, 'the game never connected to the debugger');
+  const paths = [];
+  const collect = (node) => { paths.push(node.path); node.children?.forEach(collect); };
+  collect(tree);
+  assert.ok(paths.includes('/root/Score') && paths.includes('/root/Main/Player'), paths.join(', '));
+
+  const before = JSON.parse(text(await call(client, 'get_node_properties', { nodePath: '/root/Main/Player' })));
+  assert.deepEqual(before.script, { velocity: [0, 0], speed: 0 });
+  assert.deepEqual(before.properties.position, [0, 0]);
+
+  const set = JSON.parse(text(await call(client, 'set_node_property', { nodePath: '/root/Main/Player', property: 'velocity', value: { x: 120, y: 0 } })));
+  assert.deepEqual(set.value, [120, 0]);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const after = JSON.parse(text(await call(client, 'get_node_properties', { nodePath: '/root/Main/Player', names: ['position'] })));
+  assert.ok(after.properties.position[0] > 10, `position after 0.5 s: ${after.properties.position}`);
+
+  assert.equal(await readFile(join(projectPath, 'main.tscn'), 'utf8'), scene, 'the scene file must not change');
+  await call(client, 'stop_project', {});
+});

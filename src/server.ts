@@ -20,11 +20,23 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
+import { DebugSession, RemoteNode, RemoteProperty } from './debug-session.js';
+import { VariantType } from './variant.js';
 import { DebuggerSetup, ProjectRunner } from './godot-run.js';
+import { SETTABLE_TYPES, inferVariantType, jsonToVariant, variantToJson } from './runtime-values.js';
 import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, godotVersionAtLeast, inputSchema, prepareRequest } from './tool-requests.js';
 
 // How godot_operations.gd resolves node paths; stated in every node path parameter
 const NODE_PATH_RULE = 'Node paths: "" or "root" is the scene root, and a leading "root/" is optional, so "root/Player" and "Player" are the same node.';
+
+// Property usage flags (Godot's PropertyUsageFlags) and the hint Godot sends for values too big to send
+const PROPERTY_USAGE_STORAGE = 1 << 1;
+const PROPERTY_USAGE_GROUPING = (1 << 6) | (1 << 7) | (1 << 8); // group, category, subgroup
+const PROPERTY_USAGE_SCRIPT_VARIABLE = 1 << 12;
+const PROPERTY_HINT_OBJECT_TOO_BIG = 25;
+const RUNTIME_PATH_RULE =
+  'An absolute path in the running game as get_scene_tree shows it, e.g. "/root/Main/Player" (the leading "/" is optional). ' +
+  'The running tree starts at the window "root", with autoloads next to the main scene; this differs from the scene-file tools.';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const OPERATION_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
@@ -731,6 +743,47 @@ export class GodotServer {
         minGodot: uidSupport,
         handle: (args) => this.handleUpdateProjectUids(args),
       },
+      {
+        name: 'get_scene_tree',
+        description:
+          'List the live scene tree of the game started by run_project, including autoloads and nodes created at runtime ' +
+          '(needs the remote debugger, Godot 4.2+). Each node has its path, and its engine type or, for a scripted node, ' +
+          'its script (a script with class_name shows as the type)',
+        params: {
+          path: { type: 'string', description: `Optional: list only this subtree. ${RUNTIME_PATH_RULE}` },
+          maxNodes: { type: 'number', description: 'Maximum number of nodes to list (default: 500)' },
+        },
+        required: [],
+        failure: 'Failed to get the scene tree',
+        handle: (args) => this.handleGetSceneTree(args),
+      },
+      {
+        name: 'get_node_properties',
+        description:
+          "Read a node's state in the running game: its script variables and its stored engine properties, as JSON " +
+          '(vectors as arrays, colors as {r,g,b,a}, resources as {resource}, node references as {node})',
+        params: {
+          nodePath: { type: 'string', description: RUNTIME_PATH_RULE },
+          names: { type: 'array', items: { type: 'string' }, description: 'Optional: return only these script variables or properties' },
+        },
+        required: ['nodePath'],
+        failure: 'Failed to read node properties',
+        handle: (args) => this.handleGetNodeProperties(args),
+      },
+      {
+        name: 'set_node_property',
+        description:
+          'Set a property or script variable of a node in the running game and return the value it now holds. ' +
+          'Only the running game changes; scene files are not touched',
+        params: {
+          nodePath: { type: 'string', description: RUNTIME_PATH_RULE },
+          property: { type: 'string', description: 'Property or script variable name, as get_node_properties lists it' },
+          value: { type: 'any', description: `New value as JSON. Settable types: ${SETTABLE_TYPES}` },
+        },
+        required: ['nodePath', 'property', 'value'],
+        failure: 'Failed to set the node property',
+        handle: (args) => this.handleSetNodeProperty(args),
+      },
     ];
   }
 
@@ -781,8 +834,140 @@ export class GodotServer {
     if (!godotVersionAtLeast(version, [4, 2])) {
       return { unavailable: `The remote debugger needs Godot 4.2 or later; this is ${version}` };
     }
-    // set_ignore_error_breaks exists from 4.5; earlier versions are answered with continue instead
-    return { ignoreErrorBreaks: godotVersionAtLeast(version, [4, 5]) };
+    // set_ignore_error_breaks and inspect_objects exist from 4.5; earlier versions get continue and
+    // inspect_object instead
+    const godot45 = godotVersionAtLeast(version, [4, 5]);
+    return { ignoreErrorBreaks: godot45, inspectObjects: godot45 };
+  }
+
+  /**
+   * The running game's debug session, or the error reply saying why runtime tools cannot use it
+   */
+  private runtimeSession(): DebugSession | ToolReply {
+    const session = this.runner.debugSession();
+    if (session instanceof DebugSession) return session;
+    return errorReply(session.unavailable, [
+      'Runtime tools need a game started by run_project with the remote debugger attached (Godot 4.2+)',
+      'get_debug_output shows whether the debugger is attached',
+    ]);
+  }
+
+  private missingNodeReply(session: DebugSession, path: string): ToolReply {
+    return errorReply(`No node at ${path} in the running game`, [
+      `Closest paths: ${session.nearestPaths(path).join(', ')}`,
+      'Use get_scene_tree to list the nodes',
+    ]);
+  }
+
+  private async handleGetSceneTree(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+
+    let start = await session.sceneTree();
+    if (args.path) {
+      const path = runtimePath(args.path);
+      const node = await session.findNode(path);
+      if (!node) return this.missingNodeReply(session, path);
+      start = node;
+    }
+
+    const maxNodes = args.maxNodes ?? 500;
+    let listed = 0;
+    let omitted = 0;
+    const toJson = (node: RemoteNode): object | null => {
+      if (listed >= maxNodes) {
+        omitted += countNodes(node);
+        return null;
+      }
+      listed++;
+      const scripted = node.typeName.startsWith('res://');
+      const children = node.children.map(toJson).filter((child) => child !== null);
+      return {
+        name: node.name,
+        path: node.path,
+        ...(scripted ? { script: node.typeName } : { type: node.typeName }),
+        ...(node.sceneFile ? { scene: node.sceneFile } : {}),
+        ...(children.length > 0 ? { children } : {}),
+      };
+    };
+    const tree = toJson(start);
+    return jsonReply({
+      tree,
+      ...(omitted > 0 ? { omittedNodes: omitted, note: `Only ${maxNodes} nodes are listed; pass path for a subtree or raise maxNodes` } : {}),
+    });
+  }
+
+  private async handleGetNodeProperties(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+    const path = runtimePath(args.nodePath);
+    const node = await session.findNode(path);
+    if (!node) return this.missingNodeReply(session, path);
+    const inspected = await session.inspect(node.id);
+    if (!inspected) return errorReply(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
+
+    const script: Record<string, unknown> = {};
+    const properties: Record<string, unknown> = {};
+    let scriptPath: unknown = node.typeName.startsWith('res://') ? node.typeName : undefined;
+    for (const property of inspected.properties) {
+      if (property.name === 'script' && typeof property.value === 'string') scriptPath = property.value;
+      const listed = listedProperty(property);
+      if (!listed) continue;
+      const value = property.hint === PROPERTY_HINT_OBJECT_TOO_BIG ? '<too big to send>' : variantToJson(property.value, session.nodePathOf, property.type);
+      (listed.section === 'script' ? script : properties)[listed.name] = value;
+    }
+
+    let unknownNames: string[] = [];
+    if (Array.isArray(args.names)) {
+      const wanted = new Set(args.names.map(String));
+      unknownNames = [...wanted].filter((name) => !(name in script) && !(name in properties));
+      for (const section of [script, properties]) {
+        for (const name of Object.keys(section)) if (!wanted.has(name)) delete section[name];
+      }
+    }
+
+    return jsonReply({
+      node: { path, class: inspected.className, ...(scriptPath ? { script: scriptPath } : {}) },
+      script,
+      properties,
+      ...(unknownNames.length > 0 ? { unknownNames } : {}),
+    });
+  }
+
+  private async handleSetNodeProperty(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+    const path = runtimePath(args.nodePath);
+    const node = await session.findNode(path);
+    if (!node) return this.missingNodeReply(session, path);
+    const inspected = await session.inspect(node.id);
+    if (!inspected) return errorReply(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
+
+    const entry = inspected.properties.find((property) => listedProperty(property)?.name === args.property);
+    if (!entry) {
+      return errorReply(`${path} has no property or script variable named ${args.property}`, [
+        'Use get_node_properties to list its script variables and properties',
+      ]);
+    }
+
+    let value: unknown;
+    try {
+      // Script members arrive without a declared type
+      const type = entry.type !== VariantType.NIL ? entry.type : inferVariantType(entry.value, args.value);
+      value = jsonToVariant(type, args.value);
+    } catch (error) {
+      return errorReply(`Cannot set ${args.property}: ${error instanceof Error ? error.message : error}`);
+    }
+    session.setProperty(node.id, entry.name, value);
+
+    // The game answers messages in order, so this reads the value after the change
+    const after = await session.inspect(node.id);
+    const updated = after?.properties.find((property) => property.name === entry.name);
+    return jsonReply({
+      node: path,
+      property: args.property,
+      value: updated ? variantToJson(updated.value, session.nodePathOf, updated.type) : null,
+    });
   }
 
   private async handleGetDebugOutput(): Promise<ToolReply> {
@@ -984,4 +1169,33 @@ export class GodotServer {
     console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
     await this.server.connect(transport);
   }
+}
+
+function jsonReply(value: unknown): ToolReply {
+  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
+}
+
+// Runtime node paths are absolute; the leading "/" is optional for agents
+function runtimePath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
+
+function countNodes(node: RemoteNode): number {
+  return 1 + node.children.reduce((total, child) => total + countNodes(child), 0);
+}
+
+/**
+ * Where get_node_properties lists a property, and under which name; null for entries it leaves out:
+ * editor categories and groups, script constants, the script itself, and the debugger's own
+ * Node/path and Node/multiplayer_authority entries.
+ */
+function listedProperty(property: RemoteProperty): { section: 'script' | 'properties'; name: string } | null {
+  const { name, usage } = property;
+  if (usage & PROPERTY_USAGE_GROUPING || name === 'script' || name.startsWith('Constants/') || name.startsWith('Node/')) return null;
+  // Members of the node's own script are "Members/<name>"; inherited ones "Members/<base.gd>/<name>"
+  if (name.startsWith('Members/')) return { section: 'script', name: name.slice('Members/'.length) };
+  if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) return { section: 'script', name };
+  if (usage & PROPERTY_USAGE_STORAGE) return { section: 'properties', name };
+  return null;
 }

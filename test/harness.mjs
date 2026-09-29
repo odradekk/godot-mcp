@@ -114,7 +114,8 @@ export function text(result) {
  */
 export async function makeProject(t, files = {}) {
   const projectPath = await mkdtemp(join(tmpdir(), 'godot-mcp-test-'));
-  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  // Windows keeps a killed Godot's handles on the project for a moment
+  t.after(() => rm(projectPath, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
   const all = { 'project.godot': 'config_version=5\n', ...files };
   for (const [path, content] of Object.entries(all)) {
     await mkdir(dirname(join(projectPath, path)), { recursive: true });
@@ -127,13 +128,16 @@ export async function makeProject(t, files = {}) {
  * Connect to the debug port in a game's --remote-debug argument, as the real game does.
  * `send(frame)` writes raw frames (see debuggerFixtures); `received` holds the decoded
  * [name, threadId, data] messages from the server, and `waitFor(name)` resolves with the first
- * one of that name.
+ * one of that name. `answer(name, ...frames)` replies to every later message of that name;
+ * `rawReceived` keeps each message's bytes for checking encoded Variant types.
  */
 async function connectDebugger(args) {
   const url = new URL(args[args.indexOf('--remote-debug') + 1]);
   const socket = net.connect(Number(url.port), url.hostname);
   await once(socket, 'connect');
   const received = [];
+  const rawReceived = [];
+  const answers = new Map();
   const waiters = [];
   let pending = Buffer.alloc(0);
   socket.on('data', (chunk) => {
@@ -141,13 +145,17 @@ async function connectDebugger(args) {
     while (pending.length >= 4 && pending.length >= 4 + pending.readUInt32LE(0)) {
       const length = pending.readUInt32LE(0);
       const [message] = decodeVariant(pending, 4);
+      rawReceived.push(Buffer.from(pending.subarray(4, 4 + length)));
       pending = pending.subarray(4 + length);
       received.push(message);
+      for (const frame of answers.get(message[0]) ?? []) socket.write(frame);
       for (const waiter of [...waiters]) waiter();
     }
   });
   return {
     received,
+    rawReceived,
+    answer: (name, ...frames) => answers.set(name, frames),
     send: (frame) => socket.write(frame),
     waitFor: (name, timeoutMs = 2000) =>
       new Promise((resolve, reject) => {

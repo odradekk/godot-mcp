@@ -63,8 +63,12 @@ Godot MCP enables AI agents to launch the Godot editor, run projects, capture de
 
 - **Launch Godot Editor**: Open the Godot editor for a specific project
 - **Run Godot Projects**: Run Godot projects; script errors are reported without pausing the game
-- **Capture Debug Output**: Retrieve console output and error messages
+- **Capture Debug Output**: Retrieve console output, plus each distinct error and warning with its script file, line and count (via Godot's remote debugger, Godot 4.2+)
 - **Control Execution**: Start and stop Godot projects programmatically
+- **Inspect the Running Game** (Godot 4.2+, via Godot's remote debugger; nothing is added to your project):
+  - List the live scene tree, including autoloads and nodes created at runtime
+  - Read a node's script variables and properties
+  - Change a property or script variable while the game runs
 - **Get Godot Version**: Retrieve the installed Godot version
 - **List Godot Projects**: Find Godot projects in a specified directory
 - **Project Analysis**: Get detailed information about project structure
@@ -129,7 +133,10 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
         "export_mesh_library",
         "save_scene",
         "get_uid",
-        "update_project_uids"
+        "update_project_uids",
+        "get_scene_tree",
+        "get_node_properties",
+        "set_node_property"
       ]
     }
   }

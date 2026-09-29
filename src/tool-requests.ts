@@ -27,7 +27,8 @@ export interface ToolReply {
 export type Check = 'project' | 'directory' | 'projectFile' | 'existingFile' | 'className';
 
 export interface Param {
-  type: 'string' | 'boolean' | 'object' | 'array';
+  /** 'any' lists no type in the schema, for parameters that take any JSON value */
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'any';
   description: string;
   items?: { type: string };
   check?: Check;
@@ -73,7 +74,7 @@ export function inputSchema(tool: ToolDefinition) {
   const properties = Object.fromEntries(
     Object.entries(tool.params).map(([name, { type, items, description }]) => [
       name,
-      items ? { type, items, description } : { type, description },
+      type === 'any' ? { description } : items ? { type, items, description } : { type, description },
     ])
   );
   return { type: 'object' as const, properties, required: tool.required };
@@ -97,7 +98,8 @@ export async function prepareRequest(
     }
   }
 
-  const missing = tool.required.filter((name) => args[name] === undefined || args[name] === '');
+  // An empty string counts as missing for string parameters, not for parameters taking any JSON value
+  const missing = tool.required.filter((name) => args[name] === undefined || (args[name] === '' && tool.params[name].type === 'string'));
   if (missing.length > 0) {
     return { error: errorReply(`Missing required parameters: ${missing.join(', ')}`, [`Provide ${tool.required.join(', ')}`]) };
   }
