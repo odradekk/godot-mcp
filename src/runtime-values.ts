@@ -3,7 +3,7 @@
  * that tools exchange with AI agents.
  */
 
-import { TypedValue, Variant, VariantType, decodedVariantType } from './variant.js';
+import { TypedVariant, Variant, VariantType } from './variant.js';
 
 /** The path of a node in the running game, if `objectId` is one */
 export type NodePathOf = (objectId: bigint) => string | undefined;
@@ -20,19 +20,24 @@ export function variantToJson(value: Variant, nodePathOf: NodePathOf, declaredTy
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'string') return declaredType === VariantType.OBJECT ? { resource: value } : value;
-  if (isObjectReference(value)) {
-    const path = nodePathOf(value.objectId);
-    return path ? { node: path } : { objectId: value.objectId.toString() };
-  }
-  const type = decodedVariantType(value) ?? declaredType;
-  if (Array.isArray(value)) {
-    if (type === VariantType.COLOR) {
-      const [r, g, b, a] = value as number[];
-      return { r, g, b, a };
-    }
-    return value.map((item) => variantToJson(item, nodePathOf));
-  }
+  if (value instanceof TypedVariant) return typedToJson(value, nodePathOf);
+  if (Array.isArray(value)) return value.map((item) => variantToJson(item, nodePathOf));
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, variantToJson(item, nodePathOf)]));
+}
+
+function typedToJson({ type, value }: TypedVariant, nodePathOf: NodePathOf): unknown {
+  if (type === VariantType.COLOR) {
+    const [r, g, b, a] = value as number[];
+    return { r, g, b, a };
+  }
+  if (typeof value === 'bigint') {
+    // An object sent by ID
+    const path = nodePathOf(value);
+    return path ? { node: path } : { objectId: value.toString() };
+  }
+  if (Array.isArray(value)) return value.map((item) => variantToJson(item, nodePathOf));
+  if (typeof value === 'object') return variantToJson(value, nodePathOf);
+  return value;
 }
 
 const VECTOR_AXES: Partial<Record<VariantType, string[]>> = {
@@ -64,7 +69,7 @@ export function jsonToVariant(type: VariantType, json: unknown): unknown {
       return json;
     case VariantType.FLOAT:
       if (typeof json !== 'number') throw mismatch();
-      return { variantType: VariantType.FLOAT, value: json } satisfies TypedValue;
+      return new TypedVariant(VariantType.FLOAT, json);
     case VariantType.STRING:
     case VariantType.STRING_NAME:
     case VariantType.NODE_PATH:
@@ -74,7 +79,7 @@ export function jsonToVariant(type: VariantType, json: unknown): unknown {
     case VariantType.COLOR: {
       const rgba = components(json, ['r', 'g', 'b', 'a'], 3);
       if (!rgba) throw mismatch();
-      return { variantType: type, value: rgba.length === 3 ? [...rgba, 1] : rgba } satisfies TypedValue;
+      return new TypedVariant(type, rgba.length === 3 ? [...rgba, 1] : rgba);
     }
     case VariantType.ARRAY:
       if (!Array.isArray(json) || !json.every((item) => ['boolean', 'number', 'string'].includes(typeof item))) throw mismatch();
@@ -84,18 +89,19 @@ export function jsonToVariant(type: VariantType, json: unknown): unknown {
       if (!axes) throw new Error(`A ${name} property cannot be set from JSON. Settable types: ${SETTABLE_TYPES}`);
       const values = components(json, axes, axes.length);
       if (!values) throw mismatch();
-      return { variantType: type, value: values } satisfies TypedValue;
+      return new TypedVariant(type, values);
     }
   }
 }
 
 /**
  * The type to set a property to when the game declared none (script members arrive as NIL):
- * the current value's decoded type, else inferred from the current value and the new JSON value.
+ * the current value's type, else inferred from the current value and the new JSON value.
  */
 export function inferVariantType(current: Variant, json: unknown): VariantType {
-  const decoded = decodedVariantType(current);
-  if (decoded !== undefined) return decoded;
+  if (current instanceof TypedVariant) return current.type;
+  if (Array.isArray(current)) return VariantType.ARRAY;
+  if (typeof current === 'object' && current !== null) return VariantType.DICTIONARY;
   const sample = current ?? json;
   if (typeof sample === 'boolean') return VariantType.BOOL;
   if (typeof sample === 'string') return VariantType.STRING;
@@ -118,8 +124,4 @@ function components(json: unknown, keys: string[], required: number): number[] |
     return null;
   }
   return values as number[];
-}
-
-function isObjectReference(value: object): value is { objectId: bigint } {
-  return 'objectId' in value && typeof (value as { objectId: unknown }).objectId === 'bigint';
 }

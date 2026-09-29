@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { connect, debuggerFixtures, fakeLauncher, makeProject, text } from './harness.mjs';
-import { decodeVariant } from '../build/variant.js';
+import { variantToJson } from '../build/runtime-values.js';
+import { TypedVariant, decodeVariant } from '../build/variant.js';
 
 const GODOT = '/opt/godot';
 const { frames } = debuggerFixtures();
@@ -168,7 +169,7 @@ test('set_node_property encodes the JSON value as the property type', async (t) 
     const index = debug.received.findIndex(([name], i) => i >= before && name === 'scene:set_object_property');
     const [, , [, name, sentValue]] = debug.received[index];
     assert.equal(name, sentName);
-    assert.deepEqual(sentValue, decoded);
+    assert.deepEqual(sentValue instanceof TypedVariant ? sentValue.value : sentValue, decoded);
     assert.equal(sentValueType(debug.rawReceived[index]), variantType, property);
   }
 });
@@ -198,4 +199,21 @@ test('runtime tools explain why they cannot answer', async (t) => {
 
   assert.equal(notStarted, 'No game has been started. Use run_project first.');
   assert.equal(notConnected, 'The game has not connected to the debugger yet; try again in a moment');
+});
+
+test('a Dictionary with an objectId key stays a Dictionary', () => {
+  // { "objectId": <int64> }: Dictionary header, one entry, String key, 64-bit INT value
+  const key = Buffer.from('objectId');
+  const buf = Buffer.alloc(4 + 4 + 8 + key.length + 12);
+  buf.writeUInt32LE(27, 0);
+  buf.writeUInt32LE(1, 4);
+  buf.writeUInt32LE(4, 8);
+  buf.writeUInt32LE(key.length, 12);
+  key.copy(buf, 16);
+  buf.writeUInt32LE(2 | (1 << 16), 16 + key.length);
+  buf.writeBigInt64LE(2n ** 60n, 20 + key.length);
+
+  const [dictionary] = decodeVariant(buf);
+
+  assert.deepEqual(variantToJson(dictionary, () => '/root/Main'), { objectId: String(2n ** 60n) });
 });
