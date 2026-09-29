@@ -2132,13 +2132,9 @@ class GodotServer {
         );
       }
 
-      // Prepare parameters for the operation (already in camelCase)
-      const params = {
-        projectPath: args.projectPath,
-      };
-
-      // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('resave_resources', params, args.projectPath);
+      // Execute the operation. The script scans res:// by default; args.projectPath is a disk path
+      // for --path and must not be passed as the scan root.
+      const { stdout, stderr, exitCode } = await this.executeOperation('resave_resources', {}, args.projectPath);
 
       if (exitCode !== 0) {
         return this.createErrorResponse(

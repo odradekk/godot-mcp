@@ -941,7 +941,10 @@ func find_files(path, extension):
     var files = []
     var dir = DirAccess.open(path)
     
-    if dir:
+    if dir == null:
+        printerr("Failed to open directory: " + path + ", error: " + str(DirAccess.get_open_error()))
+        exit_code = 1
+    else:
         dir.list_dir_begin()
         var file_name = dir.get_next()
         
