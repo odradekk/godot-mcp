@@ -40,7 +40,8 @@ export function fakeLauncher(respond) {
 
 /**
  * A child process driven by the test: write to child.stdout and child.stderr, and end it with
- * child.exit(code). kill() exits with code null unless child.ignoreKill is set.
+ * child.exit(code). kill(signal) records the signal in child.signals and exits with code null,
+ * unless the signal is in child.ignoredSignals.
  */
 function fakeChild(args) {
   const child = new EventEmitter();
@@ -49,7 +50,8 @@ function fakeChild(args) {
   child.connectDebugger = () => connectDebugger(args);
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  child.ignoreKill = false;
+  child.signals = [];
+  child.ignoredSignals = [];
   child.exit = (code) => {
     // Like a real process, 'close' follows once both streams have been read to the end
     let open = 2;
@@ -61,9 +63,10 @@ function fakeChild(args) {
     child.stdout.end();
     child.stderr.end();
   };
-  child.kill = () => {
+  child.kill = (signal = 'SIGTERM') => {
     child.killed = true;
-    if (!child.ignoreKill) child.exit(null);
+    child.signals.push(signal);
+    if (!child.ignoredSignals.includes(signal)) child.exit(null);
     return true;
   };
   return child;
