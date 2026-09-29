@@ -8,12 +8,12 @@ export interface GodotLauncher {
   /**
    * Run a command to completion. Resolves with the output and exit code whenever the process
    * exits, including with a non-zero code. Rejects when the process cannot start, times out,
-   * or is killed by a signal.
+   * exceeds the output limit, or is killed by a signal; the error message says which.
    */
   run(
     file: string,
     args: string[],
-    options?: { timeoutMs?: number }
+    options?: { timeoutMs?: number; maxBufferBytes?: number }
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
   /**
@@ -24,16 +24,23 @@ export interface GodotLauncher {
 
 export const nodeLauncher: GodotLauncher = {
   run(file, args, options = {}) {
+    const { timeoutMs, maxBufferBytes } = options;
     return new Promise((resolve, reject) => {
       // Argument arrays are passed to the executable directly, with no shell interpretation
-      execFile(file, args, { timeout: options.timeoutMs }, (error, stdout, stderr) => {
-        // execFile reports a non-zero exit as an error carrying the numeric exit code.
-        // Start failures (e.g. ENOENT) have a string code; signal kills and timeouts have none.
-        if (error && typeof error.code !== 'number') {
+      execFile(file, args, { timeout: timeoutMs, maxBuffer: maxBufferBytes }, (error, stdout, stderr) => {
+        if (!error) {
+          resolve({ stdout, stderr, exitCode: 0 });
+        } else if (typeof error.code === 'number') {
+          // execFile reports a non-zero exit as an error carrying the numeric exit code
+          resolve({ stdout, stderr, exitCode: error.code });
+        } else if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          reject(new Error(`Godot output exceeded ${(maxBufferBytes ?? 1024 * 1024) / (1024 * 1024)} MiB and the process was stopped`));
+        } else if (error.killed && timeoutMs !== undefined) {
+          reject(new Error(`Godot timed out after ${timeoutMs / 1000} s and the process was stopped`));
+        } else {
+          // Start failures (e.g. ENOENT) and signal kills
           reject(error);
-          return;
         }
-        resolve({ stdout, stderr, exitCode: error ? (error.code as number) : 0 });
       });
     });
   },
