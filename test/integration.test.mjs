@@ -142,3 +142,26 @@ test('real Godot: node paths follow one rule in every tool', { skip }, async (t)
   const notAScene = await call(client, 'add_node', { projectPath, scenePath: 'gradient.tres', nodeType: 'Node2D', nodeName: 'X' });
   assert.equal(notAScene.content[0].text, 'Failed to add node: Not a scene file: res://gradient.tres');
 });
+
+test('real Godot: run_project captures a game run until it exits', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const projectPath = await makeProject(t, {
+    'project.godot': 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
+    'main.gd': 'extends Node\n\nfunc _ready():\n\tprint("hello from the game")\n\tprinterr("a game warning")\n\tget_tree().quit(3)\n',
+    'main.tscn': '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  });
+
+  const started = await call(client, 'run_project', { projectPath });
+  assert.equal(started.isError, undefined, text(started));
+  let run;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    run = JSON.parse(text(await call(client, 'get_debug_output', {})));
+    if (!run.running) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  assert.equal(run.running, false);
+  assert.equal(run.exitCode, 3);
+  assert.ok(run.output.includes('hello from the game'), run.output.join('\n'));
+  assert.ok(run.errors.includes('a game warning'), run.errors.join('\n'));
+});

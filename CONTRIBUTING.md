@@ -52,6 +52,7 @@ godot-mcp/
 │   ├── server.ts    # MCP server: tool table and handlers
 │   ├── tool-requests.ts   # Tool schemas and request checks, from each tool's declaration
 │   ├── godot-launcher.ts  # Starts Godot processes (replaced by a fake in tests)
+│   ├── godot-run.ts # The game run behind run_project, get_debug_output and stop_project
 │   └── scripts/     # GDScript run by Godot for scene operations
 ├── build/           # Compiled JavaScript (generated)
 ├── test/            # node:test suites, run against build/
