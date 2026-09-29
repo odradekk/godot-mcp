@@ -31,7 +31,7 @@ async function setup(t, { version } = {}) {
 // Parameters Godot received for the last operation run
 function operationParams(launcher) {
   const { args } = launcher.calls.at(-1);
-  return JSON.parse(args[args.indexOf('--script') + 3]);
+  return JSON.parse(args[args.indexOf('--') + 2]);
 }
 
 test('each missing required parameter is reported by name before anything runs', async (t) => {

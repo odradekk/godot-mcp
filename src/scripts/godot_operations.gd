@@ -13,42 +13,24 @@ var exit_code = 0
 var reported = false
 
 func _init():
-    run_operation(OS.get_cmdline_args())
+    run_operation(OS.get_cmdline_user_args())
     # A script error aborts the running function but lets its caller continue, so an operation
     # that hit one (or forgot to report) ends up here without a result.
     if not reported:
         fail("Operation ended without reporting a result")
     quit(exit_code)
 
+# The arguments after "--": the operation, its parameters as JSON, and optionally
+# --debug-godot
 func run_operation(args):
-    # Check for debug flag
     debug_mode = "--debug-godot" in args
-    
-    # Find the script argument and determine the positions of operation and params
-    var script_index = args.find("--script")
-    if script_index == -1:
-        return fail("Could not find --script argument")
-    
-    # The operation should be 2 positions after the script path (script_index + 1 is the script path itself)
-    var operation_index = script_index + 2
-    # The params should be 3 positions after the script path
-    var params_index = script_index + 3
-    
-    if args.size() <= params_index:
-        return fail("Not enough command-line arguments. Usage: godot --headless --script godot_operations.gd <operation> <json_params>")
-    
-    # Log all arguments for debugging
-    log_debug("All arguments: " + str(args))
-    log_debug("Script index: " + str(script_index))
-    log_debug("Operation index: " + str(operation_index))
-    log_debug("Params index: " + str(params_index))
-    
-    var operation = args[operation_index]
-    var params_json = args[params_index]
-    
+    if args.size() < 2:
+        return fail("Not enough arguments. Usage: godot --headless --script godot_operations.gd -- <operation> <json_params> [--debug-godot]")
+    var operation = args[0]
+    var params_json = args[1]
     log_info("Operation: " + operation)
     log_debug("Params JSON: " + params_json)
-    
+
     # Parse JSON using Godot 4.x API
     var json = JSON.new()
     var error = json.parse(params_json)
@@ -58,9 +40,7 @@ func run_operation(args):
     var params = json.get_data()
     if typeof(params) != TYPE_DICTIONARY:
         return fail("Failed to parse JSON parameters: expected an object, got: " + params_json)
-    
-    log_info("Executing operation: " + operation)
-    
+
     match operation:
         "create_scene":
             create_scene(params)
@@ -103,82 +83,27 @@ func log_debug(message):
 func log_info(message):
     print("[INFO] " + message)
 
-# Get a script by registered class name.
-# Only looks up names via the project's global class registry. Raw paths
-# (e.g. "res://evil.gd") are intentionally not accepted here to prevent
-# arbitrary script instantiation from agent-supplied input.
-func get_script_by_name(name_of_class):
-    if debug_mode:
-        print("Attempting to get script for class: " + name_of_class)
-
-    # Search for it in the global class registry if it's a class name
-    var global_classes = ProjectSettings.get_global_class_list()
-    if debug_mode:
-        print("Searching through " + str(global_classes.size()) + " global classes")
-    
-    for global_class in global_classes:
-        var found_name_of_class = global_class["class"]
-        var found_path = global_class["path"]
-        
-        if found_name_of_class == name_of_class:
-            if debug_mode:
-                print("Found matching class in registry: " + found_name_of_class + " at path: " + found_path)
-            var script = load(found_path) as Script
-            if script:
-                if debug_mode:
-                    print("Successfully loaded script from registry")
-                return script
-            else:
-                printerr("Failed to load script from registry path: " + found_path)
-                break
-    
-    printerr("Could not find script for class: " + name_of_class)
-    return null
-
-# Instantiate a class by name
+# Instantiate a Godot class, or a global script class (class_name) by its registered name. Raw
+# paths (e.g. "res://evil.gd") are intentionally not accepted, so agent-supplied input cannot
+# instantiate arbitrary scripts. On failure returns fail(...), which is null.
 func instantiate_class(name_of_class):
-    if name_of_class.is_empty():
-        printerr("Cannot instantiate class: name is empty")
-        return null
-    
-    var result = null
-    if debug_mode:
-        print("Attempting to instantiate class: " + name_of_class)
-    
-    # Check if it's a built-in class
+    var failure = "Failed to instantiate node of type: " + name_of_class + ". "
     if ClassDB.class_exists(name_of_class):
-        if debug_mode:
-            print("Class exists in ClassDB, using ClassDB.instantiate()")
-        if ClassDB.can_instantiate(name_of_class):
-            result = ClassDB.instantiate(name_of_class)
-            if result == null:
-                printerr("ClassDB.instantiate() returned null for class: " + name_of_class)
-        else:
-            printerr("Class exists but cannot be instantiated: " + name_of_class)
-            printerr("This may be an abstract class or interface that cannot be directly instantiated")
-    else:
-        # Try to get the script
-        if debug_mode:
-            print("Class not found in ClassDB, trying to get script")
-        var script = get_script_by_name(name_of_class)
-        if script is GDScript:
-            if debug_mode:
-                print("Found GDScript, creating instance")
-            result = script.new()
-        else:
-            printerr("Failed to get script for class: " + name_of_class)
-            return null
-    
-    if result == null:
-        printerr("Failed to instantiate class: " + name_of_class)
-    elif debug_mode:
-        print("Successfully instantiated class: " + name_of_class + " of type: " + result.get_class())
-    
-    return result
+        if not ClassDB.can_instantiate(name_of_class):
+            return fail(failure + "It is an abstract class that cannot be instantiated.")
+        return ClassDB.instantiate(name_of_class)
+    for global_class in ProjectSettings.get_global_class_list():
+        if global_class["class"] == name_of_class:
+            var script = load(global_class["path"])
+            if not script is GDScript:
+                return fail(failure + "Its script could not be loaded: " + global_class["path"])
+            log_debug("Instantiating global class " + name_of_class + " from " + global_class["path"])
+            return script.new()
+    return fail(failure + "It must be a Godot class that can be instantiated or a global script class (class_name).")
 
 # --- Scene editing ---
-# Shared by the scene operations. On failure these call fail(...) and return null or false,
-# so the calling operation only needs to return.
+# Shared by the scene operations. On failure these return fail(...), which is null, and on
+# success a node or true, so the calling operation only checks the value and returns.
 
 # `path` relative to the project, or already a res:// path
 func to_res_path(path):
@@ -220,18 +145,15 @@ func set_node_properties(node, properties):
         var value = properties[property]
         var property_type = get_property_type(node, property)
         if property_type == -1:
-            fail("Unknown property '" + property + "' on node type: " + node.get_class())
-            return false
+            return fail("Unknown property '" + property + "' on node type: " + node.get_class())
         if property_type == TYPE_OBJECT and typeof(value) == TYPE_STRING and value.begins_with("res://"):
             value = load(value) if ResourceLoader.exists(value) else null
             if value == null:
-                fail("Cannot load resource " + properties[property] + " for property: " + property)
-                return false
+                return fail("Cannot load resource " + properties[property] + " for property: " + property)
         elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
             value = dictionary_to_type(value, property_type)
             if value == null:
-                fail("Cannot convert " + JSON.stringify(properties[property]) + " to " + type_string(property_type) + " for property: " + property)
-                return false
+                return fail("Cannot convert " + JSON.stringify(properties[property]) + " to " + type_string(property_type) + " for property: " + property)
         log_debug("Setting property: " + property + " = " + str(value))
         node.set(property, value)
     return true
@@ -265,12 +187,10 @@ func save_resource(resource, path):
         log_debug("Creating directory: " + dir)
         var dir_error = DirAccess.make_dir_recursive_absolute(dir)
         if dir_error != OK:
-            fail("Failed to create directory " + dir + ": " + error_string(dir_error))
-            return false
+            return fail("Failed to create directory " + dir + ": " + error_string(dir_error))
     var save_error = ResourceSaver.save(resource, res_path)
     if save_error != OK:
-        fail("Failed to save " + res_path + ": " + error_string(save_error))
-        return false
+        return fail("Failed to save " + res_path + ": " + error_string(save_error))
     return true
 
 # Pack a scene's nodes (those owned by scene_root) and save them
@@ -278,8 +198,7 @@ func save_scene_root(scene_root, path):
     var packed_scene = PackedScene.new()
     var pack_error = packed_scene.pack(scene_root)
     if pack_error != OK:
-        fail("Failed to pack scene: " + error_string(pack_error))
-        return false
+        return fail("Failed to pack scene: " + error_string(pack_error))
     return save_resource(packed_scene, path)
 
 # --- Scene operations ---
@@ -288,7 +207,7 @@ func create_scene(params):
     var root_node_type = params.get("rootNodeType", "Node2D")
     var scene_root = instantiate_class(root_node_type)
     if not scene_root:
-        return fail("Failed to instantiate node of type: " + root_node_type + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
+        return
     scene_root.name = "root"
     if not save_scene_root(scene_root, params.scenePath):
         return
@@ -304,7 +223,7 @@ func add_node(params):
         return
     var new_node = instantiate_class(params.nodeType)
     if not new_node:
-        return fail("Failed to instantiate node of type: " + params.nodeType + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
+        return
     new_node.name = params.nodeName
     if params.has("properties") and not set_node_properties(new_node, params.properties):
         return
@@ -428,93 +347,32 @@ func get_uid(params):
         result.message = "No UID found for this file. Use update_project_uids to generate UIDs."
     ok(result)
 
-# Resave all resources to update UID references
-func resave_resources(params):
-    print("Resaving all resources to update UID references...")
-    
-    # Get project path if provided
-    var project_path = "res://"
-    if params.has("projectPath"):
-        project_path = to_res_path(params.projectPath)
-        if not project_path.ends_with("/"):
-            project_path += "/"
-    
-    if debug_mode:
-        print("Using project path: " + project_path)
-    
-    # Get all .tscn files
-    if debug_mode:
-        print("Searching for scene files in: " + project_path)
+# Resave every scene, so its references carry UIDs, and check that every script and shader has a
+# UID. Missing .uid files are written beforehand by the editor's filesystem scan (godot --import);
+# ResourceSaver does not write them outside the editor.
+func resave_resources(_params):
     var problems = []
-    var scenes = find_files(project_path, ".tscn", problems)
-    if debug_mode:
-        print("Found " + str(scenes.size()) + " scenes")
-    
-    # Resave each scene
-    var success_count = 0
-    var error_count = 0
-    
+    var scenes = find_files("res://", ".tscn", problems)
     for scene_path in scenes:
-        if debug_mode:
-            print("Processing scene: " + scene_path)
-        
-        # Check if the scene file exists
-        var file_check = FileAccess.file_exists(scene_path)
-        if debug_mode:
-            print("Scene file exists check: " + str(file_check))
-        
-        if not file_check:
-            problems.append("Scene file does not exist at: " + scene_path)
-            error_count += 1
-            continue
-        
-        # Load the scene
         var scene = load(scene_path)
-        if scene:
-            if debug_mode:
-                print("Scene loaded successfully, saving...")
-            var error = ResourceSaver.save(scene, scene_path)
-            if debug_mode:
-                print("Save result: " + str(error) + " (OK=" + str(OK) + ")")
-            
-            if error == OK:
-                success_count += 1
-                if debug_mode:
-                    print("Scene saved successfully: " + scene_path)
-            else:
-                error_count += 1
-                problems.append("Failed to save: " + scene_path + ", error: " + error_string(error))
-        else:
-            error_count += 1
+        if not scene:
             problems.append("Failed to load: " + scene_path)
-    
-    # Get all .gd and .gdshader files (Godot 3 .shader files are not Godot 4 resources and have no UID)
-    if debug_mode:
-        print("Searching for script and shader files in: " + project_path)
-    var scripts = find_files(project_path, ".gd", problems) + find_files(project_path, ".gdshader", problems)
-    if debug_mode:
-        print("Found " + str(scripts.size()) + " scripts/shaders")
-    
-    # Missing .uid files are generated beforehand by the editor's filesystem scan (godot --import).
-    # ResourceSaver does not write them when running outside the editor, so only verify here.
-    var missing_uids = 0
+            continue
+        var error = ResourceSaver.save(scene, scene_path)
+        if error != OK:
+            problems.append("Failed to save: " + scene_path + ", error: " + error_string(error))
+        else:
+            log_debug("Resaved " + scene_path)
+
+    # Godot 3 .shader files are not Godot 4 resources and have no UID
+    var scripts = find_files("res://", ".gd", problems) + find_files("res://", ".gdshader", problems)
     for script_path in scripts:
         if ResourceLoader.get_resource_uid(script_path) == ResourceUID.INVALID_ID:
-            missing_uids += 1
             problems.append("No UID for: " + script_path)
-        elif debug_mode:
-            print("UID exists for: " + script_path)
-    
-    if debug_mode:
-        print("Summary:")
-        print("- Scenes processed: " + str(scenes.size()))
-        print("- Scenes successfully saved: " + str(success_count))
-        print("- Scenes with errors: " + str(error_count))
-        print("- Scripts/shaders missing UIDs: " + str(missing_uids))
-    
+
     if not problems.is_empty():
         return fail(str(problems.size()) + " problem(s) while resaving resources: " + "; ".join(problems))
-    ok({"scenesResaved": success_count, "scriptsChecked": scripts.size()})
+    ok({"scenesResaved": scenes.size(), "scriptsChecked": scripts.size()})
 
 # Save a scene, optionally to a new path (creating its directory)
 func save_scene(params):
