@@ -29,7 +29,7 @@ export interface RunSnapshot {
  * Whether to attach the remote debugger to a run: its settings, or why it is not attached.
  */
 export type DebuggerSetup =
-  | { ignoreErrorBreaks: boolean; inspectObjects: boolean; breakOnError: boolean; breakpoints: Breakpoint[] }
+  | { ignoreErrorBreaks: boolean; inspectObjects: boolean; breakOnError: boolean; breakpoints: ReadonlyMap<string, Breakpoint> }
   | { unavailable: string };
 
 /**

@@ -99,5 +99,5 @@ async function debuggerSetup(ctx: ToolContext, breakOnError: boolean): Promise<D
   // set_ignore_error_breaks and inspect_objects exist from 4.5; earlier versions get continue and
   // inspect_object instead
   const godot45 = godotVersionAtLeast(version, [4, 5]);
-  return { ignoreErrorBreaks: godot45, inspectObjects: godot45, breakOnError, breakpoints: [...ctx.breakpoints.values()] };
+  return { ignoreErrorBreaks: godot45, inspectObjects: godot45, breakOnError, breakpoints: ctx.breakpoints };
 }
