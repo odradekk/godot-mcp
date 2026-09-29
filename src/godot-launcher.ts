@@ -23,9 +23,12 @@ export interface GodotLauncher {
   start(file: string, args: string[], options?: { detached?: boolean }): ChildProcess;
 }
 
+// Node's own default for execFile
+const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
+
 export const nodeLauncher: GodotLauncher = {
   run(file, args, options = {}) {
-    const { timeoutMs, maxBufferBytes } = options;
+    const { timeoutMs, maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES } = options;
     return new Promise((resolve, reject) => {
       // Argument arrays are passed to the executable directly, with no shell interpretation
       execFile(file, args, { timeout: timeoutMs, maxBuffer: maxBufferBytes }, (error, stdout, stderr) => {
@@ -35,7 +38,7 @@ export const nodeLauncher: GodotLauncher = {
           // execFile reports a non-zero exit as an error carrying the numeric exit code
           resolve({ stdout, stderr, exitCode: error.code });
         } else if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-          reject(new Error(`Godot output exceeded ${(maxBufferBytes ?? 1024 * 1024) / (1024 * 1024)} MiB and the process was stopped`));
+          reject(new Error(`Godot output exceeded ${maxBufferBytes / (1024 * 1024)} MiB and the process was stopped`));
         } else if (error.killed && timeoutMs !== undefined) {
           reject(new Error(`Godot timed out after ${timeoutMs / 1000} s and the process was stopped`));
         } else {

@@ -20,44 +20,44 @@ type GodotRun = { stdout: string; stderr: string; exitCode: number };
 /**
  * What a finished run produced, or why it failed. `log` is the rest of Godot's output.
  */
-type Outcome = { ok: true; result: any; log: string } | { ok: false; error: string; log: string };
+type Outcome = { ok: true; result: unknown; log: string } | { ok: false; error: string; log: string };
 
 /**
  * A tool whose whole job is the godot_operations.gd operation of the same name, run with every
  * argument except projectPath. Success replies with `render(result)`.
  */
-export function operationTool(
+export function operationTool<R>(
   ctx: ToolContext,
-  tool: Omit<ToolDefinition, 'handle'> & { solutions: string[]; render(result: any, args: ToolArgs): string }
+  tool: Omit<ToolDefinition, 'handle'> & { solutions: string[]; render(result: R, args: ToolArgs): string }
 ): ToolDefinition {
   const { solutions, render, ...definition } = tool;
   return {
     ...definition,
     handle: async (args) => {
       const { projectPath, ...params } = args;
-      return textReply(render(await scriptOperation(ctx, tool.name, params, projectPath, tool.failure, solutions), args));
+      return textReply(render(await scriptOperation<R>(ctx, tool.name, params, projectPath, tool.failure, solutions), args));
     },
   };
 }
 
 /**
- * Run a godot_operations.gd operation and return the result it reported. Throws ToolError led by
- * `failure` when the operation fails or reports nothing.
+ * Run a godot_operations.gd operation and return the result it reported, which the caller states
+ * the type of. Throws ToolError led by `failure` when the operation fails or reports nothing.
  */
-export function scriptOperation(
+export async function scriptOperation<R>(
   ctx: ToolContext,
   operation: string,
   params: ToolArgs,
   projectPath: string,
   failure: string,
   solutions: string[]
-): Promise<any> {
-  // An argument array reaches Godot without shell interpretation
-  // Arguments after "--" reach the script, not Godot
+): Promise<R> {
+  // An argument array reaches Godot without shell interpretation, and arguments after "--" reach
+  // the script, not Godot
   const args = ['--headless', '--path', projectPath, '--script', OPERATIONS_SCRIPT, '--', operation, JSON.stringify(params)];
   if (ctx.debugMode) args.push('--debug-godot');
   ctx.log(`Executing: ${ctx.godotPath} ${args.join(' ')}`);
-  return runGodot(ctx, args, readOperationOutcome, failure, solutions);
+  return (await runGodot(ctx, args, readOperationOutcome, failure, solutions)) as R;
 }
 
 /**
@@ -90,7 +90,7 @@ async function runGodot(
   read: (run: GodotRun) => Outcome,
   failure: string,
   solutions: string[]
-): Promise<any> {
+): Promise<unknown> {
   let outcome: Outcome;
   try {
     outcome = read(

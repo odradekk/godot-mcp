@@ -22,7 +22,7 @@ export function sceneFile(description: string): Param {
 export function sceneTools(ctx: ToolContext): ToolDefinition[] {
   const projectPath = projectPathParam;
   return [
-    operationTool(ctx, {
+    operationTool<{ scenePath: string }>(ctx, {
       name: 'create_scene',
       description: 'Create a new Godot scene file',
       params: {
@@ -39,7 +39,7 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
       ],
       render: (result) => `Scene created successfully at: ${result.scenePath}`,
     }),
-    operationTool(ctx, {
+    operationTool<{ nodePath: string; nodeType: string; scenePath: string }>(ctx, {
       name: 'add_node',
       description: 'Add a node to an existing scene',
       params: {
@@ -63,7 +63,7 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
       render: (result, args) =>
         `Node '${args.nodeName}' of type '${result.nodeType}' added successfully at ${result.nodePath} in '${result.scenePath}'.`,
     }),
-    operationTool(ctx, {
+    operationTool<{ texturePath: string; nodePath: string; scenePath: string }>(ctx, {
       name: 'load_sprite',
       description: 'Load a sprite into a Sprite2D node',
       params: {
@@ -91,7 +91,7 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
       render: (result) =>
         `Sprite loaded successfully with texture: ${result.texturePath} on ${result.nodePath} in '${result.scenePath}'.`,
     }),
-    operationTool(ctx, {
+    operationTool<{ outputPath: string; items: string[] }>(ctx, {
       name: 'export_mesh_library',
       description: 'Export a scene as a MeshLibrary resource',
       params: {
@@ -114,7 +114,7 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
       render: (result) =>
         `MeshLibrary exported successfully to: ${result.outputPath} (${result.items.length} items: ${result.items.join(', ')})`,
     }),
-    operationTool(ctx, {
+    operationTool<{ scenePath: string }>(ctx, {
       name: 'save_scene',
       description: 'Save changes to a scene file',
       params: {
@@ -131,7 +131,7 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
       ],
       render: (result) => `Scene saved successfully to: ${result.scenePath}`,
     }),
-    operationTool(ctx, {
+    operationTool<Record<string, unknown>>(ctx, {
       name: 'get_uid',
       description: 'Get the UID for a specific file in a Godot project (for Godot 4.4+)',
       params: {
@@ -158,7 +158,14 @@ export function sceneTools(ctx: ToolContext): ToolDefinition[] {
         await importProject(ctx, args.projectPath, failure, solutions);
         // The script scans res:// by default; args.projectPath is a disk path for --path and must not
         // be passed as the scan root.
-        const result = await scriptOperation(ctx, 'resave_resources', {}, args.projectPath, failure, solutions);
+        const result = await scriptOperation<{ scenesResaved: number; scriptsChecked: number }>(
+          ctx,
+          'resave_resources',
+          {},
+          args.projectPath,
+          failure,
+          solutions
+        );
         return textReply(
           `Project UIDs updated successfully. Resaved ${result.scenesResaved} scenes; ${result.scriptsChecked} scripts and shaders have UIDs.`
         );

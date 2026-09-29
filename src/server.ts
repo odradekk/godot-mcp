@@ -27,14 +27,16 @@ import { sceneTools } from './tools/scene.js';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 
-/**
- * Interface for server configuration
- */
 export interface GodotServerConfig {
+  /** Godot executable to try first; an invalid path falls back to detection. */
   godotPath?: string;
   /** Log debug messages to stderr. Defaults to DEBUG=true in `env`. */
   debugMode?: boolean;
-  strictPathValidation?: boolean; // New option to control path validation behavior
+  /**
+   * Make connect() reject when no Godot is found, instead of falling back to a default install
+   * path. Defaults to false.
+   */
+  strictPathValidation?: boolean;
   /** Platform whose install locations are searched for Godot. Defaults to process.platform. */
   platform?: NodeJS.Platform;
   /** Source of GODOT_PATH, DEBUG, HOME and USERPROFILE. Defaults to process.env. */
@@ -52,9 +54,6 @@ export interface GodotServerConfig {
   remoteDebugger?: boolean;
 }
 
-/**
- * Main server class for the Godot MCP server
- */
 export class GodotServer {
   private server: Server;
   private runner: ProjectRunner;
