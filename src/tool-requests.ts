@@ -145,14 +145,20 @@ export async function prepareRequest(
   if (tool.minGodot) {
     const { version: [major, minor], feature, solutions } = tool.minGodot;
     const version = await godotVersion();
-    const match = version.match(/^(\d+)\.(\d+)/);
-    const supported = match !== null && (Number(match[1]) > major || (Number(match[1]) === major && Number(match[2]) >= minor));
-    if (!supported) {
+    if (!godotVersionAtLeast(version, [major, minor])) {
       return { error: errorReply(`${feature} are only supported in Godot ${major}.${minor} or later. Current version: ${version}`, solutions) };
     }
   }
 
   return { args };
+}
+
+/**
+ * Whether a `godot --version` string such as "4.7.2.stable.official" is at least major.minor
+ */
+export function godotVersionAtLeast(version: string, [major, minor]: [number, number]): boolean {
+  const match = version.match(/^(\d+)\.(\d+)/);
+  return match !== null && (Number(match[1]) > major || (Number(match[1]) === major && Number(match[2]) >= minor));
 }
 
 function snakeCase(name: string): string {

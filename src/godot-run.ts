@@ -4,6 +4,7 @@
 
 import { ChildProcess } from 'child_process';
 
+import { DebugSession, DebuggerStatus, ReportedError } from './debug-session.js';
 import { GodotLauncher } from './godot-launcher.js';
 
 const DEFAULT_MAX_LINES = 1000;
@@ -17,7 +18,17 @@ export interface RunSnapshot {
   /** Oldest lines discarded once a stream exceeded the line limit */
   droppedOutputLines: number;
   droppedErrorLines: number;
+  debugger: DebuggerStatus;
+  /** Errors and warnings the game reported through the debugger, repeats merged */
+  reportedErrors: ReportedError[];
+  /** Error reports not stored because the list of distinct errors was full */
+  droppedReportedErrors: number;
 }
+
+/**
+ * Whether to attach the remote debugger to a run: its settings, or why it is not attached.
+ */
+export type DebuggerSetup = { ignoreErrorBreaks: boolean } | { unavailable: string };
 
 /**
  * Lines of one output stream. A line may arrive over several chunks; empty lines are skipped and
@@ -58,6 +69,9 @@ interface Run {
   errors: LineLog;
   running: boolean;
   exitCode: number | null;
+  session: DebugSession | null;
+  /** Why the run has no debug session */
+  unattachedReason?: string;
   /** Resolves once the process has exited and its output has been read */
   finished: Promise<void>;
 }
@@ -71,10 +85,27 @@ export class ProjectRunner {
   ) {}
 
   /**
-   * Start a game run, first stopping the current one and waiting for it to exit.
+   * Start a game run, first stopping the current one and waiting for it to exit. With a debugger
+   * setup, the game connects to a debug session that listens before the game is launched.
    */
-  async start(godotPath: string, args: string[]): Promise<void> {
+  async start(godotPath: string, args: string[], debuggerSetup: DebuggerSetup): Promise<void> {
     await this.stop();
+
+    let session: DebugSession | null = null;
+    let unattachedReason: string | undefined;
+    if ('unavailable' in debuggerSetup) {
+      unattachedReason = debuggerSetup.unavailable;
+    } else {
+      session = new DebugSession({ ignoreErrorBreaks: debuggerSetup.ignoreErrorBreaks, log: this.options.log });
+      try {
+        const port = await session.listen();
+        args = ['--remote-debug', `tcp://127.0.0.1:${port}`, ...args];
+      } catch (error) {
+        session.close();
+        session = null;
+        unattachedReason = `Could not listen for the debugger: ${error instanceof Error ? error.message : error}`;
+      }
+    }
 
     const maxLines = this.options.maxLines ?? DEFAULT_MAX_LINES;
     const process = this.launcher.start(godotPath, args);
@@ -87,6 +118,8 @@ export class ProjectRunner {
       errors,
       running: true,
       exitCode: null,
+      session,
+      unattachedReason,
       finished: new Promise((resolve) => {
         finish = (exitCode) => {
           if (!run.running) return;
@@ -94,6 +127,7 @@ export class ProjectRunner {
           errors.end();
           run.running = false;
           run.exitCode = exitCode;
+          session?.close();
           this.options.log?.(`Godot process exited with code ${exitCode}`);
           resolve();
         };
@@ -130,6 +164,9 @@ export class ProjectRunner {
       errors: [...run.errors.lines],
       droppedOutputLines: run.output.dropped,
       droppedErrorLines: run.errors.dropped,
+      debugger: run.session?.status() ?? { attached: false, reason: run.unattachedReason },
+      reportedErrors: run.session?.reportedErrors() ?? [],
+      droppedReportedErrors: run.session?.droppedErrorReports ?? 0,
     };
   }
 

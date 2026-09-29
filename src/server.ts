@@ -20,8 +20,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
-import { ProjectRunner } from './godot-run.js';
-import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, inputSchema, prepareRequest } from './tool-requests.js';
+import { DebuggerSetup, ProjectRunner } from './godot-run.js';
+import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, godotVersionAtLeast, inputSchema, prepareRequest } from './tool-requests.js';
 
 // How godot_operations.gd resolves node paths; stated in every node path parameter
 const NODE_PATH_RULE = 'Node paths: "" or "root" is the scene root, and a leading "root/" is optional, so "root/Player" and "Player" are the same node.';
@@ -93,6 +93,8 @@ export interface GodotServerConfig {
   operationTimeoutMs?: number;
   /** How long stop_project and shutdown wait for the game to exit after killing it, in milliseconds. Defaults to 5 seconds. */
   stopTimeoutMs?: number;
+  /** Attach Godot's remote debugger to games started by run_project (Godot 4.2+). Defaults to true. */
+  remoteDebugger?: boolean;
 }
 
 /**
@@ -101,6 +103,7 @@ export interface GodotServerConfig {
 export class GodotServer {
   private server: Server;
   private runner: ProjectRunner;
+  private remoteDebugger: boolean;
   private godotPath: string | null = null;
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
@@ -119,6 +122,7 @@ export class GodotServer {
     this.debugMode = config.debugMode ?? this.env.DEBUG === 'true';
     this.strictPathValidation = config.strictPathValidation ?? false;
     this.operationTimeoutMs = config.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.remoteDebugger = config.remoteDebugger ?? true;
     this.runner = new ProjectRunner(this.launcher, {
       stopTimeoutMs: config.stopTimeoutMs,
       log: (message) => this.logDebug(message),
@@ -540,7 +544,7 @@ export class GodotServer {
       },
       {
         name: 'get_debug_output',
-        description: 'Get the current debug output and errors',
+        description: 'Get the current debug output and errors. With the remote debugger attached, reportedErrors lists each distinct error and warning once, with its script file, line and count',
         ...noParams,
         failure: 'Failed to get debug output',
         handle: () => this.handleGetDebugOutput(),
@@ -753,11 +757,32 @@ export class GodotServer {
     }
 
     this.logDebug(`Running Godot project: ${cmdArgs.join(' ')}`);
-    await this.runner.start(this.godotPath!, cmdArgs);
+    await this.runner.start(this.godotPath!, cmdArgs, await this.debuggerSetup());
 
     return {
       content: [{ type: 'text', text: `Godot project started. Use get_debug_output to see its output and errors.` }],
     };
+  }
+
+  /**
+   * Whether run_project attaches the remote debugger, given the configuration and Godot version
+   */
+  private async debuggerSetup(): Promise<DebuggerSetup> {
+    if (!this.remoteDebugger) {
+      return { unavailable: 'The remote debugger is turned off in the server configuration' };
+    }
+    let version: string;
+    try {
+      version = await this.getGodotVersion();
+    } catch (error) {
+      return { unavailable: `Could not read the Godot version: ${error instanceof Error ? error.message : error}` };
+    }
+    // 4.0 and 4.1 use an older message format
+    if (!godotVersionAtLeast(version, [4, 2])) {
+      return { unavailable: `The remote debugger needs Godot 4.2 or later; this is ${version}` };
+    }
+    // set_ignore_error_breaks exists from 4.5; earlier versions are answered with continue instead
+    return { ignoreErrorBreaks: godotVersionAtLeast(version, [4, 5]) };
   }
 
   private async handleGetDebugOutput(): Promise<ToolReply> {
@@ -793,6 +818,9 @@ export class GodotServer {
               finalErrors: run.errors,
               droppedOutputLines: run.droppedOutputLines,
               droppedErrorLines: run.droppedErrorLines,
+              debugger: run.debugger,
+              reportedErrors: run.reportedErrors,
+              droppedReportedErrors: run.droppedReportedErrors,
             },
             null,
             2
