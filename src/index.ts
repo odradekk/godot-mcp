@@ -33,12 +33,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
- * Interface representing a running Godot process
+ * Interface representing a Godot process started by run_project.
+ * The record is kept after the process exits so its output can still be read.
  */
 interface GodotProcess {
   process: any;
   output: string[];
   errors: string[];
+  running: boolean;
+  exitCode: number | null;
 }
 
 /**
@@ -479,13 +482,13 @@ class GodotServer {
    * @param operation The operation to execute
    * @param params The parameters for the operation
    * @param projectPath The path to the Godot project
-   * @returns The stdout and stderr from the operation
+   * @returns The stdout, stderr, and exit code of the operation
    */
   private async executeOperation(
     operation: string,
     params: OperationParams,
     projectPath: string
-  ): Promise<{ stdout: string; stderr: string }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     this.logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     this.logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
@@ -527,14 +530,16 @@ class GodotServer {
 
       const { stdout, stderr } = await execFileAsync(this.godotPath!, args);
 
-      return { stdout: stdout ?? '', stderr: stderr ?? '' };
+      return { stdout: stdout ?? '', stderr: stderr ?? '', exitCode: 0 };
     } catch (error: unknown) {
-      // If execFileAsync throws, it still contains stdout/stderr
-      if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-        const execError = error as Error & { stdout: string; stderr: string };
+      // execFileAsync rejects on a non-zero exit; the error still carries the exit code and output.
+      // Spawn failures and signal kills have no numeric code and are rethrown.
+      if (error instanceof Error && typeof (error as { code?: unknown }).code === 'number') {
+        const execError = error as Error & { code: number; stdout?: string; stderr?: string };
         return {
           stdout: execError.stdout ?? '',
           stderr: execError.stderr ?? '',
+          exitCode: execError.code,
         };
       }
 
@@ -1082,7 +1087,7 @@ class GodotServer {
       }
 
       // Kill any existing process
-      if (this.activeProcess) {
+      if (this.activeProcess?.running) {
         this.logDebug('Killing existing Godot process before starting a new one');
         this.activeProcess.process.kill();
       }
@@ -1095,8 +1100,8 @@ class GodotServer {
 
       this.logDebug(`Running Godot project: ${args.projectPath}`);
       const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
-      const output: string[] = [];
-      const errors: string[] = [];
+      const run: GodotProcess = { process, output: [], errors: [], running: true, exitCode: null };
+      const { output, errors } = run;
 
       process.stdout?.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
@@ -1116,19 +1121,17 @@ class GodotServer {
 
       process.on('exit', (code: number | null) => {
         this.logDebug(`Godot process exited with code ${code}`);
-        if (this.activeProcess && this.activeProcess.process === process) {
-          this.activeProcess = null;
-        }
+        run.running = false;
+        run.exitCode = code;
       });
 
       process.on('error', (err: Error) => {
         console.error('Failed to start Godot process:', err);
-        if (this.activeProcess && this.activeProcess.process === process) {
-          this.activeProcess = null;
-        }
+        run.running = false;
+        errors.push(err.message);
       });
 
-      this.activeProcess = { process, output, errors };
+      this.activeProcess = run;
 
       return {
         content: [
@@ -1157,10 +1160,9 @@ class GodotServer {
   private async handleGetDebugOutput() {
     if (!this.activeProcess) {
       return this.createErrorResponse(
-        'No active Godot process.',
+        'No Godot process has been started.',
         [
           'Use run_project to start a Godot project first',
-          'Check if the Godot process crashed unexpectedly',
         ]
       );
     }
@@ -1171,6 +1173,8 @@ class GodotServer {
           type: 'text',
           text: JSON.stringify(
             {
+              running: this.activeProcess.running,
+              exitCode: this.activeProcess.exitCode,
               output: this.activeProcess.output,
               errors: this.activeProcess.errors,
             },
@@ -1186,12 +1190,12 @@ class GodotServer {
    * Handle the stop_project tool
    */
   private async handleStopProject() {
-    if (!this.activeProcess) {
+    if (!this.activeProcess?.running) {
       return this.createErrorResponse(
-        'No active Godot process to stop.',
+        'No running Godot process to stop.',
         [
           'Use run_project to start a Godot project first',
-          'The process may have already terminated',
+          'The process may have already terminated; use get_debug_output to read its output',
         ]
       );
     }
@@ -1200,7 +1204,6 @@ class GodotServer {
     this.activeProcess.process.kill();
     const output = this.activeProcess.output;
     const errors = this.activeProcess.errors;
-    this.activeProcess = null;
 
     return {
       content: [
@@ -1525,9 +1528,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('create_scene', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('create_scene', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to create scene: ${stderr}`,
           [
@@ -1628,9 +1631,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('add_node', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('add_node', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to add node: ${stderr}`,
           [
@@ -1732,9 +1735,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('load_sprite', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('load_sprite', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to load sprite: ${stderr}`,
           [
@@ -1827,9 +1830,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('export_mesh_library', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('export_mesh_library', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to export mesh library: ${stderr}`,
           [
@@ -1925,9 +1928,9 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('save_scene', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('save_scene', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to save scene: ${stderr}`,
           [
@@ -2036,9 +2039,9 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('get_uid', params, args.projectPath);
+      const { stdout, stderr, exitCode } = await this.executeOperation('get_uid', params, args.projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to get UID: ${stderr}`,
           [
@@ -2130,15 +2133,11 @@ class GodotServer {
         );
       }
 
-      // Prepare parameters for the operation (already in camelCase)
-      const params = {
-        projectPath: args.projectPath,
-      };
+      // Execute the operation. The script scans res:// by default; args.projectPath is a disk path
+      // for --path and must not be passed as the scan root.
+      const { stdout, stderr, exitCode } = await this.executeOperation('resave_resources', {}, args.projectPath);
 
-      // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('resave_resources', params, args.projectPath);
-
-      if (stderr && stderr.includes('Failed to')) {
+      if (exitCode !== 0) {
         return this.createErrorResponse(
           `Failed to update project UIDs: ${stderr}`,
           [
