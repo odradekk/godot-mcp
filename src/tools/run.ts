@@ -18,6 +18,7 @@ export function runTools(ctx: ToolContext): ToolDefinition[] {
         breakOnError: {
           type: 'boolean',
           description: 'Pause the game on script errors instead of running through them, to inspect the failing frame (default: false; needs the remote debugger)',
+          default: false,
         },
       },
       required: ['projectPath'],
@@ -30,7 +31,7 @@ export function runTools(ctx: ToolContext): ToolDefinition[] {
           cmdArgs.push(args.scene);
         }
         ctx.log(`Running Godot project: ${cmdArgs.join(' ')}`);
-        await ctx.runner.start(ctx.godotPath, cmdArgs, await debuggerSetup(ctx, args.breakOnError === true));
+        await ctx.runner.start(ctx.godotPath, cmdArgs, await debuggerSetup(ctx, args.breakOnError));
         return textReply(`Godot project started. Use get_debug_output to see its output and errors.`);
       },
     },

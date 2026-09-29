@@ -202,7 +202,7 @@ test('version limits: evaluate needs Godot 4.4, stepping out 4.6', async (t) => 
   const withoutOut = await setup(t, { version: '4.5.1.stable.official' });
   await withoutOut.hitBreakpoint();
 
-  assert.equal((await old.call('evaluate', { expression: '1' })).content.at(-1).text, 'Evaluating expressions needs Godot 4.4 or later');
+  assert.equal((await old.call('evaluate', { expression: '1' })).content.at(-2).text, 'Godot 4.4 or later is needed for evaluating expressions; this is 4.3.stable.official');
   assert.equal((await withoutOut.call('resume_game', { action: 'out' })).content.at(-2).text, 'Stepping out needs Godot 4.6 or later');
 });
 

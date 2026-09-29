@@ -144,7 +144,7 @@ export class GodotServer {
       try {
         const prepared = await prepareRequest(tool, request.params.arguments ?? {}, ctx.godotVersion);
         if ('error' in prepared) {
-          return prepared.error;
+          return this.withPauseNote(prepared.error);
         }
         return this.withPauseNote(await tool.handle(prepared.args));
       } catch (error: unknown) {

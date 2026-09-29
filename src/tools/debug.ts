@@ -16,15 +16,14 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         'While any is set, breakpoint statements in scripts pause the game too. Returns all breakpoints',
       params: {
         file: { type: 'string', description: 'Script path, relative to the project or res://', check: 'projectFile' },
-        line: { type: 'number', description: 'Line number (1-based)' },
-        enabled: { type: 'boolean', description: 'false clears the breakpoint (default: true)' },
+        line: { type: 'integer', description: 'Line number (1-based)', minimum: 1 },
+        enabled: { type: 'boolean', description: 'false clears the breakpoint (default: true)', default: true },
       },
       required: ['file', 'line'],
       failure: 'Failed to set the breakpoint',
       handle: async (args) => {
-        if (!Number.isInteger(args.line) || args.line < 1) throw new ToolError(`line must be a positive whole number, got ${args.line}`);
-        const breakpoint = { file: String(args.file).startsWith('res://') ? String(args.file) : `res://${args.file}`, line: args.line };
-        const enabled = args.enabled !== false;
+        const breakpoint = { file: args.file.startsWith('res://') ? args.file : `res://${args.file}`, line: args.line };
+        const enabled: boolean = args.enabled;
         const key = `${breakpoint.file}:${breakpoint.line}`;
         if (enabled) ctx.breakpoints.set(key, breakpoint);
         else ctx.breakpoints.delete(key);
@@ -65,24 +64,29 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         action: {
           type: 'string',
           description: 'continue (default), step (into calls), next (over calls) or out (of the current function; Godot 4.6+)',
+          enum: ['continue', 'step', 'next', 'out'],
+          default: 'continue',
         },
-        waitMs: { type: 'number', description: 'How long to wait for the next pause, in ms (default: 5000, at most 60000)' },
+        waitMs: {
+          type: 'number',
+          description: 'How long to wait for the next pause, in ms (default: 5000, at most 60000)',
+          minimum: 0,
+          maximum: 60000,
+          default: 5000,
+        },
       },
       required: [],
       failure: 'Failed to resume the game',
       handle: async (args) => {
         const session = requireSession(ctx.runner);
-        const action = (args.action ?? 'continue') as ResumeAction;
-        if (!['continue', 'step', 'next', 'out'].includes(action)) {
-          throw new ToolError(`Unknown action ${action}`, ['Use continue, step, next or out']);
-        }
+        const action: ResumeAction = args.action;
         if (!session.isPaused) throw new ToolError('The game is not paused', ['Use pause_game, or set_breakpoint and get_debug_state with waitMs']);
         if (action === 'out' && !godotVersionAtLeast(await ctx.godotVersion(), [4, 6])) {
           throw new ToolError('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
         }
         const since = session.pauseNumber;
         session.resume(action);
-        await session.waitForPause(since, waitTime(args.waitMs, 5000));
+        await session.waitForPause(since, args.waitMs);
         return debugStateReply(ctx, session);
       },
     },
@@ -92,8 +96,8 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         'Whether the game is running, paused or exited, with the pause state when paused. waitMs waits for the game to pause ' +
         '(for example at a breakpoint); frame reads the variables of another stack frame',
       params: {
-        waitMs: { type: 'number', description: 'Wait up to this many ms for a pause (default: 0, at most 60000)' },
-        frame: { type: 'number', description: 'Stack frame for the variables, 0 is the innermost (default: 0)' },
+        waitMs: { type: 'number', description: 'Wait up to this many ms for a pause (default: 0, at most 60000)', minimum: 0, maximum: 60000, default: 0 },
+        frame: { type: 'integer', description: 'Stack frame for the variables, 0 is the innermost (default: 0)', minimum: 0, default: 0 },
       },
       required: [],
       failure: 'Failed to get the debug state',
@@ -105,13 +109,13 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
           if (run && !run.running) return jsonReply({ status: 'exited', exitCode: run.exitCode });
           throw sessionUnavailable(ctx.runner.noSessionReason());
         }
-        const frame = args.frame ?? 0;
-        if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, waitTime(args.waitMs, 0));
+        const frame: number = args.frame;
+        if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, args.waitMs);
         else if (session.isPaused && !session.pause) await session.waitForPause(session.pauseNumber - 1, 3000);
         if (frame !== 0) {
           const pause = session.pause;
           if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');
-          if (!Number.isInteger(frame) || frame < 0 || frame >= pause.stack.length) {
+          if (frame >= pause.stack.length) {
             throw new ToolError(`frame must be between 0 and ${pause.stack.length - 1}`);
           }
           return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
@@ -125,17 +129,16 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         'Evaluate a GDScript expression in a frame of the paused game (Godot 4.4+). Godot returns null when the expression fails',
       params: {
         expression: { type: 'string', description: 'Expression, e.g. "direction * speed"' },
-        frame: { type: 'number', description: 'Stack frame, 0 is the innermost (default: 0)' },
+        frame: { type: 'integer', description: 'Stack frame, 0 is the innermost (default: 0)', minimum: 0, default: 0 },
       },
       required: ['expression'],
       failure: 'Failed to evaluate the expression',
+      minGodot: { version: [4, 4], feature: 'evaluating expressions', solutions: ['Upgrade to Godot 4.4 or later to evaluate expressions'] },
       handle: async (args) => {
         const session = requireSession(ctx.runner);
         if (!session.pause) throw new ToolError('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
-        if (!godotVersionAtLeast(await ctx.godotVersion(), [4, 4])) throw new ToolError('Evaluating expressions needs Godot 4.4 or later');
-        const frame = args.frame ?? 0;
         try {
-          return jsonReply({ expression: args.expression, frame, value: await session.evaluate(String(args.expression), frame) });
+          return jsonReply({ expression: args.expression, frame: args.frame, value: await session.evaluate(args.expression, args.frame) });
         } catch (error) {
           // Godot does not answer outside a script instance's frame (e.g. in a static function)
           throw new ToolError(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
@@ -155,10 +158,4 @@ function debugStateReply(ctx: ToolContext, session: DebugSession): ToolReply {
   if (pause) return jsonReply({ status: 'paused', pause });
   if (!session.isConnected) return jsonReply({ status: 'running', note: 'The game has not connected to the debugger yet' });
   return jsonReply({ status: session.isPaused ? 'pausing' : 'running' });
-}
-
-// A waitMs argument, bounded to 60 s
-function waitTime(value: unknown, fallback: number): number {
-  const ms = typeof value === 'number' && value >= 0 ? value : fallback;
-  return Math.min(ms, 60000);
 }
