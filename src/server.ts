@@ -22,6 +22,9 @@ import {
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
 import { Param, ToolArgs, ToolDefinition, ToolReply, errorReply, inputSchema, prepareRequest } from './tool-requests.js';
 
+// How godot_operations.gd resolves node paths; stated in every node path parameter
+const NODE_PATH_RULE = 'Node paths: "" or "root" is the scene root, and a leading "root/" is optional, so "root/Player" and "Player" are the same node.';
+
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const OPERATION_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
 // Lines of Godot output attached to failure replies
@@ -610,7 +613,10 @@ export class GodotServer {
         params: {
           projectPath,
           scenePath: sceneFile('Path to the scene file (relative to project)'),
-          parentNodePath: { type: 'string', description: 'Path to the parent node (e.g., "root" or "root/Player")' },
+          parentNodePath: {
+            type: 'string',
+            description: `Path to the parent node (default: the scene root). ${NODE_PATH_RULE}`,
+          },
           nodeType: { type: 'string', description: 'Type of node to add (e.g., Sprite2D, CollisionShape2D)', check: 'className' },
           nodeName: { type: 'string', description: 'Name for the new node' },
           properties: { type: 'object', description: 'Optional properties to set on the node' },
@@ -634,7 +640,10 @@ export class GodotServer {
         params: {
           projectPath,
           scenePath: sceneFile('Path to the scene file (relative to project)'),
-          nodePath: { type: 'string', description: 'Path to the Sprite2D node (e.g., "root/Player/Sprite2D")' },
+          nodePath: {
+            type: 'string',
+            description: `Path to the Sprite2D, Sprite3D or TextureRect node (e.g., "root/Player/Sprite2D"). ${NODE_PATH_RULE}`,
+          },
           texturePath: {
             type: 'string',
             description: 'Path to the texture file (relative to project)',
