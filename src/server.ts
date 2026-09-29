@@ -6,9 +6,6 @@
  * capture debug output, and control project execution.
  */
 
-import { join, basename } from 'path';
-import { existsSync, readdirSync, readFileSync } from 'fs';
-
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -19,40 +16,17 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
-import { Breakpoint, DebugSession, InspectedObject, PauseState, RemoteNode, RemoteProperty, ResumeAction } from './debug-session.js';
-import { VariantType } from './variant.js';
-import { DebuggerSetup, ProjectRunner } from './godot-run.js';
-import { findGodot } from './godot-path.js';
-import { importProject, operationTool, scriptOperation } from './operations.js';
-import { SETTABLE_TYPES, inferVariantType, jsonToVariant, variantToJson } from './runtime-values.js';
-import {
-  Param,
-  ToolArgs,
-  ToolContext,
-  ToolDefinition,
-  ToolError,
-  ToolReply,
-  errorReply,
-  godotVersionAtLeast,
-  inputSchema,
-  jsonReply,
-  prepareRequest,
-  textReply,
-} from './tool-requests.js';
-
-// How godot_operations.gd resolves node paths; stated in every node path parameter
-const NODE_PATH_RULE = 'Node paths: "" or "root" is the scene root, and a leading "root/" is optional, so "root/Player" and "Player" are the same node.';
-
-// Property usage flags (Godot's PropertyUsageFlags) and the hint Godot sends for values too big to send
-const PROPERTY_USAGE_STORAGE = 1 << 1;
-const PROPERTY_USAGE_GROUPING = (1 << 6) | (1 << 7) | (1 << 8); // group, category, subgroup
-const PROPERTY_USAGE_SCRIPT_VARIABLE = 1 << 12;
-const PROPERTY_HINT_OBJECT_TOO_BIG = 25;
-const RUNTIME_PATH_RULE =
-  'An absolute path in the running game as get_scene_tree shows it, e.g. "/root/Main/Player" (the leading "/" is optional). ' +
-  'The running tree starts at the window "root", with autoloads next to the main scene; this differs from the scene-file tools.';
+import { findGodot, readGodotVersion } from './godot-path.js';
+import { ProjectRunner } from './godot-run.js';
+import { ToolContext, ToolDefinition, ToolError, ToolReply, errorReply, inputSchema, prepareRequest } from './tool-requests.js';
+import { debugTools } from './tools/debug.js';
+import { projectTools } from './tools/project.js';
+import { runTools } from './tools/run.js';
+import { runtimeTools } from './tools/runtime.js';
+import { sceneTools } from './tools/scene.js';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+
 /**
  * Interface for server configuration
  */
@@ -84,60 +58,57 @@ export interface GodotServerConfig {
 export class GodotServer {
   private server: Server;
   private runner: ProjectRunner;
-  private remoteDebugger: boolean;
-  // Kept by the server, so they apply to every run
-  private breakpoints = new Map<string, Breakpoint>();
-  private configuredGodotPath: string | undefined;
-  private godotPath: string | null = null;
-  private strictPathValidation: boolean;
-  private debugMode: boolean;
-  private platform: NodeJS.Platform;
-  private env: NodeJS.ProcessEnv;
   private launcher: GodotLauncher;
-  private operationTimeoutMs: number;
-  private godotVersion: Promise<string> | null = null;
+  private env: NodeJS.ProcessEnv;
+  private debugMode: boolean;
 
-  constructor(config: GodotServerConfig = {}) {
+  constructor(private config: GodotServerConfig = {}) {
     this.env = config.env ?? process.env;
-    this.platform = config.platform ?? process.platform;
     this.launcher = config.launcher ?? nodeLauncher;
     this.debugMode = config.debugMode ?? this.env.DEBUG === 'true';
-    this.strictPathValidation = config.strictPathValidation ?? false;
-    this.operationTimeoutMs = config.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
-    this.remoteDebugger = config.remoteDebugger ?? true;
     this.runner = new ProjectRunner(this.launcher, {
       stopTimeoutMs: config.stopTimeoutMs,
       log: (message) => this.logDebug(message),
     });
-
-    // Validated with --version when the server connects; an invalid path falls back to detection
-    this.configuredGodotPath = config.godotPath;
-
-    // Initialize the MCP server
-    this.server = new Server(
-      {
-        name: 'godot-mcp',
-        version: '0.1.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Error handling
+    this.server = new Server({ name: 'godot-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
     this.server.onerror = (error) => console.error('[MCP Error]', error);
   }
 
   /**
-   * Log debug messages if debug mode is enabled
-   * Using stderr instead of stdout to avoid interfering with JSON-RPC communication
+   * Find the Godot executable, then serve MCP requests on the given transport.
+   * Rejects when no valid Godot executable is found and strictPathValidation is on.
    */
-  private logDebug(message: string): void {
-    if (this.debugMode) {
-      console.error(`[DEBUG] ${message}`);
-    }
+  async connect(transport: Transport) {
+    const log = (message: string) => this.logDebug(message);
+    const godotPath = await findGodot({
+      configured: this.config.godotPath,
+      env: this.env,
+      platform: this.config.platform ?? process.platform,
+      launcher: this.launcher,
+      strict: this.config.strictPathValidation ?? false,
+      log,
+    });
+    console.error(`[SERVER] Using Godot at: ${godotPath}`);
+
+    let version: Promise<string> | null = null;
+    const ctx: ToolContext = {
+      godotPath,
+      // Read once per server; a failed read is retried
+      godotVersion: () =>
+        (version ??= readGodotVersion(this.launcher, godotPath).catch((error) => {
+          version = null;
+          throw error;
+        })),
+      launcher: this.launcher,
+      runner: this.runner,
+      breakpoints: new Map(),
+      remoteDebugger: this.config.remoteDebugger ?? true,
+      operationTimeoutMs: this.config.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS,
+      debugMode: this.debugMode,
+      log,
+    };
+    this.registerTools(ctx, [...projectTools(ctx), ...runTools(ctx), ...sceneTools(ctx), ...runtimeTools(ctx), ...debugTools(ctx)]);
+    await this.server.connect(transport);
   }
 
   /**
@@ -150,98 +121,13 @@ export class GodotServer {
   }
 
   /**
-   * The version string `godot --version` reports. Read once per server; a failed read is retried.
-   */
-  private getGodotVersion(): Promise<string> {
-    this.godotVersion ??= this.readGodotVersion().catch((error) => {
-      this.godotVersion = null;
-      throw error;
-    });
-    return this.godotVersion;
-  }
-
-  private async readGodotVersion(): Promise<string> {
-    const { stdout, stderr, exitCode } = await this.launcher.run(this.godotPath!, ['--version'], { timeoutMs: 10000 });
-    if (exitCode !== 0) {
-      throw new Error(`godot --version exited with code ${exitCode}: ${stderr.trim()}`);
-    }
-    return stdout.trim();
-  }
-
-  /**
-   * Find Godot projects in a directory
-   * @param directory Directory to search
-   * @param recursive Whether to search recursively
-   * @returns Array of Godot projects
-   */
-  private findGodotProjects(directory: string, recursive: boolean): Array<{ path: string; name: string }> {
-    const projects: Array<{ path: string; name: string }> = [];
-
-    try {
-      // Check if the directory itself is a Godot project
-      const projectFile = join(directory, 'project.godot');
-      if (existsSync(projectFile)) {
-        projects.push({
-          path: directory,
-          name: basename(directory),
-        });
-      }
-
-      // If not recursive, only check immediate subdirectories
-      if (!recursive) {
-        const entries = readdirSync(directory, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const subdir = join(directory, entry.name);
-            const projectFile = join(subdir, 'project.godot');
-            if (existsSync(projectFile)) {
-              projects.push({
-                path: subdir,
-                name: entry.name,
-              });
-            }
-          }
-        }
-      } else {
-        // Recursive search
-        const entries = readdirSync(directory, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const subdir = join(directory, entry.name);
-            // Skip hidden directories
-            if (entry.name.startsWith('.')) {
-              continue;
-            }
-            // Check if this directory is a Godot project
-            const projectFile = join(subdir, 'project.godot');
-            if (existsSync(projectFile)) {
-              projects.push({
-                path: subdir,
-                name: entry.name,
-              });
-            } else {
-              // Recursively search this directory
-              const subProjects = this.findGodotProjects(subdir, true);
-              projects.push(...subProjects);
-            }
-          }
-        }
-      }
-    } catch (error) {
-      this.logDebug(`Error searching directory ${directory}: ${error}`);
-    }
-
-    return projects;
-  }
-
-  /**
    * Register the tool list and route tool calls through request preparation
    */
-  private setupToolHandlers() {
-    const tools = new Map(this.defineTools().map((tool) => [tool.name, tool]));
+  private registerTools(ctx: ToolContext, list: ToolDefinition[]) {
+    const tools = new Map(list.map((tool) => [tool.name, tool]));
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [...tools.values()].map((tool) => ({
+      tools: list.map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: inputSchema(tool),
@@ -256,7 +142,7 @@ export class GodotServer {
       }
 
       try {
-        const prepared = await prepareRequest(tool, request.params.arguments ?? {}, () => this.getGodotVersion());
+        const prepared = await prepareRequest(tool, request.params.arguments ?? {}, ctx.godotVersion);
         if ('error' in prepared) {
           return prepared.error;
         }
@@ -275,498 +161,6 @@ export class GodotServer {
     });
   }
 
-  private toolContext(): ToolContext {
-    return {
-      godotPath: this.godotPath!,
-      launcher: this.launcher,
-      operationTimeoutMs: this.operationTimeoutMs,
-      debugMode: this.debugMode,
-      log: (message) => this.logDebug(message),
-    };
-  }
-
-  /**
-   * The tools this server offers, in the order they are listed
-   */
-  private defineTools(): ToolDefinition[] {
-    const ctx = this.toolContext();
-    const projectPath: Param = { type: 'string', description: 'Path to the Godot project directory', check: 'project' };
-    const sceneFile = (description: string): Param => ({
-      type: 'string',
-      description,
-      check: 'existingFile',
-      label: 'Scene file',
-      hint: 'Use create_scene to create a new scene first',
-    });
-    const noParams = { params: {}, required: [] };
-    const uidSupport = {
-      version: [4, 4] as [number, number],
-      feature: 'UIDs',
-      solutions: [
-        'Upgrade to Godot 4.4 or later to use UIDs',
-        'Use resource paths instead of UIDs for this version of Godot',
-      ],
-    };
-
-    return [
-      {
-        name: 'launch_editor',
-        description: 'Launch Godot editor for a specific project',
-        params: { projectPath },
-        required: ['projectPath'],
-        failure: 'Failed to launch Godot editor',
-        handle: (args) => this.handleLaunchEditor(args),
-      },
-      {
-        name: 'run_project',
-        description: 'Run the Godot project and capture output',
-        params: {
-          projectPath,
-          scene: sceneFile('Optional: Specific scene to run'),
-          breakOnError: {
-            type: 'boolean',
-            description: 'Pause the game on script errors instead of running through them, to inspect the failing frame (default: false; needs the remote debugger)',
-          },
-        },
-        required: ['projectPath'],
-        failure: 'Failed to run Godot project',
-        handle: (args) => this.handleRunProject(args),
-      },
-      {
-        name: 'get_debug_output',
-        description: 'Get the current debug output and errors. With the remote debugger attached, reportedErrors lists each distinct error and warning once, with its script file, line and count',
-        ...noParams,
-        failure: 'Failed to get debug output',
-        handle: () => this.handleGetDebugOutput(),
-      },
-      {
-        name: 'stop_project',
-        description: 'Stop the currently running Godot project',
-        ...noParams,
-        failure: 'Failed to stop Godot project',
-        handle: () => this.handleStopProject(),
-      },
-      {
-        name: 'get_godot_version',
-        description: 'Get the installed Godot version',
-        ...noParams,
-        failure: 'Failed to get Godot version',
-        handle: () => this.handleGetGodotVersion(),
-      },
-      {
-        name: 'list_projects',
-        description: 'List Godot projects in a directory',
-        params: {
-          directory: { type: 'string', description: 'Directory to search for Godot projects', check: 'directory' },
-          recursive: { type: 'boolean', description: 'Whether to search recursively (default: false)' },
-        },
-        required: ['directory'],
-        failure: 'Failed to list projects',
-        handle: (args) => this.handleListProjects(args),
-      },
-      {
-        name: 'get_project_info',
-        description: 'Retrieve metadata about a Godot project',
-        params: { projectPath },
-        required: ['projectPath'],
-        failure: 'Failed to get project info',
-        handle: (args) => this.handleGetProjectInfo(args),
-      },
-      operationTool(ctx, {
-        name: 'create_scene',
-        description: 'Create a new Godot scene file',
-        params: {
-          projectPath,
-          scenePath: { type: 'string', description: 'Path where the scene file will be saved (relative to project)', check: 'projectFile' },
-          rootNodeType: { type: 'string', description: 'Type of the root node (e.g., Node2D, Node3D)', check: 'className' },
-        },
-        required: ['projectPath', 'scenePath'],
-        failure: 'Failed to create scene',
-        solutions: [
-          'Check if the root node type is valid',
-          'Ensure you have write permissions to the scene path',
-          'Verify the scene path is valid',
-        ],
-        render: (result) => `Scene created successfully at: ${result.scenePath}`,
-      }),
-      operationTool(ctx, {
-        name: 'add_node',
-        description: 'Add a node to an existing scene',
-        params: {
-          projectPath,
-          scenePath: sceneFile('Path to the scene file (relative to project)'),
-          parentNodePath: {
-            type: 'string',
-            description: `Path to the parent node (default: the scene root). ${NODE_PATH_RULE}`,
-          },
-          nodeType: { type: 'string', description: 'Type of node to add (e.g., Sprite2D, CollisionShape2D)', check: 'className' },
-          nodeName: { type: 'string', description: 'Name for the new node' },
-          properties: { type: 'object', description: 'Optional properties to set on the node' },
-        },
-        required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
-        failure: 'Failed to add node',
-        solutions: [
-          'Check if the node type is valid',
-          'Ensure the parent node path exists',
-          'Verify the scene file is valid',
-        ],
-        render: (result, args) =>
-          `Node '${args.nodeName}' of type '${result.nodeType}' added successfully at ${result.nodePath} in '${result.scenePath}'.`,
-      }),
-      operationTool(ctx, {
-        name: 'load_sprite',
-        description: 'Load a sprite into a Sprite2D node',
-        params: {
-          projectPath,
-          scenePath: sceneFile('Path to the scene file (relative to project)'),
-          nodePath: {
-            type: 'string',
-            description: `Path to the Sprite2D, Sprite3D or TextureRect node (e.g., "root/Player/Sprite2D"). ${NODE_PATH_RULE}`,
-          },
-          texturePath: {
-            type: 'string',
-            description: 'Path to the texture file (relative to project)',
-            check: 'existingFile',
-            label: 'Texture file',
-            hint: 'Upload or create the texture file first',
-          },
-        },
-        required: ['projectPath', 'scenePath', 'nodePath', 'texturePath'],
-        failure: 'Failed to load sprite',
-        solutions: [
-          'Check if the node path is correct',
-          'Ensure the node is a Sprite2D, Sprite3D, or TextureRect',
-          'Verify the texture file is a valid image format',
-        ],
-        render: (result) =>
-          `Sprite loaded successfully with texture: ${result.texturePath} on ${result.nodePath} in '${result.scenePath}'.`,
-      }),
-      operationTool(ctx, {
-        name: 'export_mesh_library',
-        description: 'Export a scene as a MeshLibrary resource',
-        params: {
-          projectPath,
-          scenePath: sceneFile('Path to the scene file (.tscn) to export'),
-          outputPath: { type: 'string', description: 'Path where the mesh library (.res) will be saved', check: 'projectFile' },
-          meshItemNames: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Optional: Names of specific mesh items to include (defaults to all)',
-          },
-        },
-        required: ['projectPath', 'scenePath', 'outputPath'],
-        failure: 'Failed to export mesh library',
-        solutions: [
-          'Check if the scene contains valid 3D meshes',
-          'Ensure the output path is valid',
-          'Verify the scene file is valid',
-        ],
-        render: (result) =>
-          `MeshLibrary exported successfully to: ${result.outputPath} (${result.items.length} items: ${result.items.join(', ')})`,
-      }),
-      operationTool(ctx, {
-        name: 'save_scene',
-        description: 'Save changes to a scene file',
-        params: {
-          projectPath,
-          scenePath: sceneFile('Path to the scene file (relative to project)'),
-          newPath: { type: 'string', description: 'Optional: New path to save the scene to (for creating variants)', check: 'projectFile' },
-        },
-        required: ['projectPath', 'scenePath'],
-        failure: 'Failed to save scene',
-        solutions: [
-          'Check if the scene file is valid',
-          'Ensure you have write permissions to the output path',
-          'Verify the scene can be properly packed',
-        ],
-        render: (result) => `Scene saved successfully to: ${result.scenePath}`,
-      }),
-      operationTool(ctx, {
-        name: 'get_uid',
-        description: 'Get the UID for a specific file in a Godot project (for Godot 4.4+)',
-        params: {
-          projectPath,
-          filePath: { type: 'string', description: 'Path to the file (relative to project) for which to get the UID', check: 'existingFile' },
-        },
-        required: ['projectPath', 'filePath'],
-        failure: 'Failed to get UID',
-        minGodot: uidSupport,
-        solutions: ['Check if the file is a valid Godot resource', 'Ensure the file path is correct'],
-        render: (result) => JSON.stringify(result, null, 2),
-      }),
-      {
-        name: 'update_project_uids',
-        description: 'Generate missing UIDs and resave resources in a Godot project (for Godot 4.4+)',
-        params: { projectPath },
-        required: ['projectPath'],
-        failure: 'Failed to update project UIDs',
-        minGodot: uidSupport,
-        handle: (args) => this.handleUpdateProjectUids(args),
-      },
-      {
-        name: 'get_scene_tree',
-        description:
-          'List the live scene tree of the game started by run_project, including autoloads and nodes created at runtime ' +
-          '(needs the remote debugger, Godot 4.2+). Each node has its path, and its engine type or, for a scripted node, ' +
-          'its script (a script with class_name shows as the type)',
-        params: {
-          path: { type: 'string', description: `Optional: list only this subtree. ${RUNTIME_PATH_RULE}` },
-          maxNodes: { type: 'number', description: 'Maximum number of nodes to list (default: 500)' },
-        },
-        required: [],
-        failure: 'Failed to get the scene tree',
-        handle: (args) => this.handleGetSceneTree(args),
-      },
-      {
-        name: 'get_node_properties',
-        description:
-          "Read a node's state in the running game: its script variables and its stored engine properties, as JSON " +
-          '(vectors as arrays, colors as {r,g,b,a}, resources as {resource}, node references as {node})',
-        params: {
-          nodePath: { type: 'string', description: RUNTIME_PATH_RULE },
-          names: { type: 'array', items: { type: 'string' }, description: 'Optional: return only these script variables or properties' },
-        },
-        required: ['nodePath'],
-        failure: 'Failed to read node properties',
-        handle: (args) => this.handleGetNodeProperties(args),
-      },
-      {
-        name: 'set_node_property',
-        description:
-          'Set a property or script variable of a node in the running game and return the value it now holds. ' +
-          'Only the running game changes; scene files are not touched',
-        params: {
-          nodePath: { type: 'string', description: RUNTIME_PATH_RULE },
-          property: { type: 'string', description: 'Property or script variable name, as get_node_properties lists it' },
-          value: { type: 'any', description: `New value as JSON. Settable types: ${SETTABLE_TYPES}` },
-        },
-        required: ['nodePath', 'property', 'value'],
-        failure: 'Failed to set the node property',
-        handle: (args) => this.handleSetNodeProperty(args),
-      },
-      {
-        name: 'set_breakpoint',
-        description:
-          'Set or clear a breakpoint at a script line. Breakpoints are kept across runs and apply to the running game at once. ' +
-          'While any is set, breakpoint statements in scripts pause the game too. Returns all breakpoints',
-        params: {
-          file: { type: 'string', description: 'Script path, relative to the project or res://', check: 'projectFile' },
-          line: { type: 'number', description: 'Line number (1-based)' },
-          enabled: { type: 'boolean', description: 'false clears the breakpoint (default: true)' },
-        },
-        required: ['file', 'line'],
-        failure: 'Failed to set the breakpoint',
-        handle: (args) => this.handleSetBreakpoint(args),
-      },
-      {
-        name: 'list_breakpoints',
-        description: 'List the breakpoints that are set',
-        params: {},
-        required: [],
-        failure: 'Failed to list breakpoints',
-        handle: async () => jsonReply({ breakpoints: [...this.breakpoints.values()] }),
-      },
-      {
-        name: 'pause_game',
-        description: 'Pause the running game and return where it stopped, the call stack and the variables of the top frame',
-        params: {},
-        required: [],
-        failure: 'Failed to pause the game',
-        handle: () => this.handlePauseGame(),
-      },
-      {
-        name: 'resume_game',
-        description:
-          'Continue or step the paused game, then wait for it to pause again. Returns the new pause state, ' +
-          '"running" if it did not pause within waitMs, or "exited"',
-        params: {
-          action: {
-            type: 'string',
-            description: 'continue (default), step (into calls), next (over calls) or out (of the current function; Godot 4.6+)',
-          },
-          waitMs: { type: 'number', description: 'How long to wait for the next pause, in ms (default: 5000, at most 60000)' },
-        },
-        required: [],
-        failure: 'Failed to resume the game',
-        handle: (args) => this.handleResumeGame(args),
-      },
-      {
-        name: 'get_debug_state',
-        description:
-          'Whether the game is running, paused or exited, with the pause state when paused. waitMs waits for the game to pause ' +
-          '(for example at a breakpoint); frame reads the variables of another stack frame',
-        params: {
-          waitMs: { type: 'number', description: 'Wait up to this many ms for a pause (default: 0, at most 60000)' },
-          frame: { type: 'number', description: 'Stack frame for the variables, 0 is the innermost (default: 0)' },
-        },
-        required: [],
-        failure: 'Failed to get the debug state',
-        handle: (args) => this.handleGetDebugState(args),
-      },
-      {
-        name: 'evaluate',
-        description:
-          'Evaluate a GDScript expression in a frame of the paused game (Godot 4.4+). Godot returns null when the expression fails',
-        params: {
-          expression: { type: 'string', description: 'Expression, e.g. "direction * speed"' },
-          frame: { type: 'number', description: 'Stack frame, 0 is the innermost (default: 0)' },
-        },
-        required: ['expression'],
-        failure: 'Failed to evaluate the expression',
-        handle: (args) => this.handleEvaluate(args),
-      },
-    ];
-  }
-
-  private async handleLaunchEditor(args: ToolArgs): Promise<ToolReply> {
-    this.logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-    // Detached: the editor belongs to the user and keeps running after this server exits
-    const process = this.launcher.start(this.godotPath!, ['-e', '--path', args.projectPath], { detached: true });
-
-    process.on('error', (err: Error) => {
-      console.error('Failed to start Godot editor:', err);
-    });
-
-    return {
-      content: [{ type: 'text', text: `Godot editor launched successfully for project at ${args.projectPath}.` }],
-    };
-  }
-
-  private async handleRunProject(args: ToolArgs): Promise<ToolReply> {
-    // No -d: the local debugger would stop the game at the first script error and wait for commands
-    // on stdin, which no tool can send. Errors and their GDScript backtraces still reach stderr.
-    const cmdArgs = ['--path', args.projectPath];
-    if (args.scene) {
-      cmdArgs.push(args.scene);
-    }
-
-    this.logDebug(`Running Godot project: ${cmdArgs.join(' ')}`);
-    await this.runner.start(this.godotPath!, cmdArgs, await this.debuggerSetup(args.breakOnError === true));
-
-    return {
-      content: [{ type: 'text', text: `Godot project started. Use get_debug_output to see its output and errors.` }],
-    };
-  }
-
-  /**
-   * Whether run_project attaches the remote debugger, given the configuration and Godot version
-   */
-  private async debuggerSetup(breakOnError: boolean): Promise<DebuggerSetup> {
-    if (!this.remoteDebugger) {
-      return { unavailable: 'The remote debugger is turned off in the server configuration' };
-    }
-    let version: string;
-    try {
-      version = await this.getGodotVersion();
-    } catch (error) {
-      return { unavailable: `Could not read the Godot version: ${error instanceof Error ? error.message : error}` };
-    }
-    // 4.0 and 4.1 use an older message format
-    if (!godotVersionAtLeast(version, [4, 2])) {
-      return { unavailable: `The remote debugger needs Godot 4.2 or later; this is ${version}` };
-    }
-    // set_ignore_error_breaks and inspect_objects exist from 4.5; earlier versions get continue and
-    // inspect_object instead
-    const godot45 = godotVersionAtLeast(version, [4, 5]);
-    return { ignoreErrorBreaks: godot45, inspectObjects: godot45, breakOnError, breakpoints: [...this.breakpoints.values()] };
-  }
-
-  private async handleGetSceneTree(args: ToolArgs): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    let start = await session.sceneTree();
-    if (args.path) start = await requireNode(session, runtimePath(args.path));
-
-    const maxNodes = args.maxNodes ?? 500;
-    let listed = 0;
-    let omitted = 0;
-    const toJson = (node: RemoteNode): object | null => {
-      if (listed >= maxNodes) {
-        omitted += countNodes(node);
-        return null;
-      }
-      listed++;
-      const scripted = node.typeName.startsWith('res://');
-      const children = node.children.map(toJson).filter((child) => child !== null);
-      return {
-        name: node.name,
-        path: node.path,
-        ...(scripted ? { script: node.typeName } : { type: node.typeName }),
-        ...(node.sceneFile ? { scene: node.sceneFile } : {}),
-        ...(children.length > 0 ? { children } : {}),
-      };
-    };
-    const tree = toJson(start);
-    return jsonReply({
-      tree,
-      ...(omitted > 0 ? { omittedNodes: omitted, note: `Only ${maxNodes} nodes are listed; pass path for a subtree or raise maxNodes` } : {}),
-    });
-  }
-
-  private async handleGetNodeProperties(args: ToolArgs): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    const path = runtimePath(args.nodePath);
-    const { node, inspected } = await inspectNode(session, path);
-
-    const script: Record<string, unknown> = {};
-    const properties: Record<string, unknown> = {};
-    let scriptPath: unknown = node.typeName.startsWith('res://') ? node.typeName : undefined;
-    for (const property of inspected.properties) {
-      if (property.name === 'script' && typeof property.value === 'string') scriptPath = property.value;
-      const listed = listedProperty(property);
-      if (!listed) continue;
-      const value = property.hint === PROPERTY_HINT_OBJECT_TOO_BIG ? '<too big to send>' : variantToJson(property.value, session.nodePathOf, property.type);
-      (listed.section === 'script' ? script : properties)[listed.name] = value;
-    }
-
-    let unknownNames: string[] = [];
-    if (Array.isArray(args.names)) {
-      const wanted = new Set(args.names.map(String));
-      unknownNames = [...wanted].filter((name) => !(name in script) && !(name in properties));
-      for (const section of [script, properties]) {
-        for (const name of Object.keys(section)) if (!wanted.has(name)) delete section[name];
-      }
-    }
-
-    return jsonReply({
-      node: { path, class: inspected.className, ...(scriptPath ? { script: scriptPath } : {}) },
-      script,
-      properties,
-      ...(unknownNames.length > 0 ? { unknownNames } : {}),
-    });
-  }
-
-  private async handleSetNodeProperty(args: ToolArgs): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    const path = runtimePath(args.nodePath);
-    const { node, inspected } = await inspectNode(session, path);
-
-    const entry = inspected.properties.find((property) => listedProperty(property)?.name === args.property);
-    if (!entry) {
-      throw new ToolError(`${path} has no property or script variable named ${args.property}`, [
-        'Use get_node_properties to list its script variables and properties',
-      ]);
-    }
-
-    let value: unknown;
-    try {
-      // Script members arrive without a declared type
-      const type = entry.type !== VariantType.NIL ? entry.type : inferVariantType(entry.value, args.value);
-      value = jsonToVariant(type, args.value);
-    } catch (error) {
-      throw new ToolError(`Cannot set ${args.property}: ${error instanceof Error ? error.message : error}`);
-    }
-    session.setProperty(node.id, entry.name, value);
-
-    // The game answers messages in order, so this reads the value after the change
-    const after = await session.inspect(node.id);
-    const updated = after?.properties.find((property) => property.name === entry.name);
-    return jsonReply({
-      node: path,
-      property: args.property,
-      value: updated ? variantToJson(updated.value, session.nodePathOf, updated.type) : null,
-    });
-  }
-
   /**
    * Prepend a note to a reply while the game is paused, so the agent never leaves it paused unknowingly
    */
@@ -778,342 +172,13 @@ export class GodotServer {
     return { ...reply, content: [{ type: 'text', text: `Game paused${where}; use resume_game to continue` }, ...reply.content] };
   }
 
-  private async handleSetBreakpoint(args: ToolArgs): Promise<ToolReply> {
-    if (!Number.isInteger(args.line) || args.line < 1) throw new ToolError(`line must be a positive whole number, got ${args.line}`);
-    const breakpoint = { file: String(args.file).startsWith('res://') ? String(args.file) : `res://${args.file}`, line: args.line };
-    const enabled = args.enabled !== false;
-    const key = `${breakpoint.file}:${breakpoint.line}`;
-    if (enabled) this.breakpoints.set(key, breakpoint);
-    else this.breakpoints.delete(key);
-
-    this.runner.debugSession()?.setBreakpoint(breakpoint, enabled);
-    return jsonReply({ breakpoints: [...this.breakpoints.values()] });
-  }
-
-  private async handlePauseGame(): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    if (session.isPaused) return this.debugStateReply(session);
-    const since = session.pauseNumber;
-    session.pauseGame();
-    if (!(await session.waitForPause(since, 3000))) throw new ToolError('The game did not pause within 3 s');
-    return this.debugStateReply(session);
-  }
-
-  private async handleResumeGame(args: ToolArgs): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    const action = (args.action ?? 'continue') as ResumeAction;
-    if (!['continue', 'step', 'next', 'out'].includes(action)) {
-      throw new ToolError(`Unknown action ${action}`, ['Use continue, step, next or out']);
-    }
-    if (!session.isPaused) throw new ToolError('The game is not paused', ['Use pause_game, or set_breakpoint and get_debug_state with waitMs']);
-    if (action === 'out' && !godotVersionAtLeast(await this.getGodotVersion(), [4, 6])) {
-      throw new ToolError('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
-    }
-    const since = session.pauseNumber;
-    session.resume(action);
-    await session.waitForPause(since, waitTime(args.waitMs, 5000));
-    return this.debugStateReply(session);
-  }
-
-  private async handleGetDebugState(args: ToolArgs): Promise<ToolReply> {
-    // Unlike other runtime tools, this one works before the game connects, and after it exits
-    const session = this.runner.debugSession();
-    if (!session) {
-      const run = this.runner.snapshot();
-      if (run && !run.running) return jsonReply({ status: 'exited', exitCode: run.exitCode });
-      throw sessionUnavailable(this.runner.noSessionReason());
-    }
-    const frame = args.frame ?? 0;
-    if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, waitTime(args.waitMs, 0));
-    else if (session.isPaused && !session.pause) await session.waitForPause(session.pauseNumber - 1, 3000);
-    if (frame !== 0) {
-      const pause = session.pause;
-      if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');
-      if (!Number.isInteger(frame) || frame < 0 || frame >= pause.stack.length) {
-        throw new ToolError(`frame must be between 0 and ${pause.stack.length - 1}`);
-      }
-      return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
-    }
-    return this.debugStateReply(session);
-  }
-
-  private async handleEvaluate(args: ToolArgs): Promise<ToolReply> {
-    const session = requireSession(this.runner);
-    if (!session.pause) throw new ToolError('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
-    if (!godotVersionAtLeast(await this.getGodotVersion(), [4, 4])) throw new ToolError('Evaluating expressions needs Godot 4.4 or later');
-    const frame = args.frame ?? 0;
-    try {
-      return jsonReply({ expression: args.expression, frame, value: await session.evaluate(String(args.expression), frame) });
-    } catch (error) {
-      // Godot does not answer outside a script instance's frame (e.g. in a static function)
-      throw new ToolError(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
-        'Godot evaluates only in frames that belong to a script instance',
-      ]);
-    }
-  }
-
-  /** The game's debug state: exited, running, or paused with the captured pause state */
-  private debugStateReply(session: DebugSession): ToolReply {
-    const run = this.runner.snapshot();
-    if (run && !run.running) return jsonReply({ status: 'exited', exitCode: run.exitCode });
-    const pause: PauseState | null = session.pause;
-    if (pause) return jsonReply({ status: 'paused', pause });
-    if (!session.isConnected) return jsonReply({ status: 'running', note: 'The game has not connected to the debugger yet' });
-    return jsonReply({ status: session.isPaused ? 'pausing' : 'running' });
-  }
-
-  private async handleGetDebugOutput(): Promise<ToolReply> {
-    const run = this.runner.snapshot();
-    if (!run) {
-      return errorReply('No Godot process has been started.', ['Use run_project to start a Godot project first']);
-    }
-    return { content: [{ type: 'text', text: JSON.stringify(run, null, 2) }] };
-  }
-
-  private async handleStopProject(): Promise<ToolReply> {
-    const run = await this.runner.stop();
-    if (!run) {
-      return errorReply('No running Godot process to stop.', [
-        'Use run_project to start a Godot project first',
-        'The process may have already terminated; use get_debug_output to read its output',
-      ]);
-    }
-
-    const seconds = this.runner.stopTimeoutMs / 1000;
-    const message = run.running
-      ? `Godot project did not exit within ${seconds} s of SIGTERM or ${seconds} s of SIGKILL`
-      : 'Godot project stopped';
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              message,
-              running: run.running,
-              exitCode: run.exitCode,
-              finalOutput: run.output,
-              finalErrors: run.errors,
-              droppedOutputLines: run.droppedOutputLines,
-              droppedErrorLines: run.droppedErrorLines,
-              debugger: run.debugger,
-              reportedErrors: run.reportedErrors,
-              droppedReportedErrors: run.droppedReportedErrors,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
-  }
-
-  private async handleGetGodotVersion(): Promise<ToolReply> {
-    return { content: [{ type: 'text', text: await this.getGodotVersion() }] };
-  }
-
-  private async handleListProjects(args: ToolArgs): Promise<ToolReply> {
-    this.logDebug(`Listing Godot projects in directory: ${args.directory}`);
-    const projects = this.findGodotProjects(args.directory, args.recursive === true);
-    return { content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }] };
-  }
-
   /**
-   * Get the structure of a Godot project asynchronously by counting files recursively
-   * @param projectPath Path to the Godot project
-   * @returns Promise resolving to an object with counts of scenes, scripts, assets, and other files
+   * Log debug messages if debug mode is enabled
+   * Using stderr instead of stdout to avoid interfering with JSON-RPC communication
    */
-  private getProjectStructureAsync(projectPath: string): Promise<any> {
-    return new Promise((resolve) => {
-      try {
-        const structure = {
-          scenes: 0,
-          scripts: 0,
-          assets: 0,
-          other: 0,
-        };
-
-        const scanDirectory = (currentPath: string) => {
-          const entries = readdirSync(currentPath, { withFileTypes: true });
-
-          for (const entry of entries) {
-            const entryPath = join(currentPath, entry.name);
-
-            // Skip hidden files and directories
-            if (entry.name.startsWith('.')) {
-              continue;
-            }
-
-            if (entry.isDirectory()) {
-              // Recursively scan subdirectories
-              scanDirectory(entryPath);
-            } else if (entry.isFile()) {
-              // Count file by extension
-              const ext = entry.name.split('.').pop()?.toLowerCase();
-
-              if (ext === 'tscn') {
-                structure.scenes++;
-              } else if (ext === 'gd' || ext === 'gdscript' || ext === 'cs') {
-                structure.scripts++;
-              } else if (['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'wav', 'mp3', 'ogg'].includes(ext || '')) {
-                structure.assets++;
-              } else {
-                structure.other++;
-              }
-            }
-          }
-        };
-
-        // Start scanning from the project root
-        scanDirectory(projectPath);
-        resolve(structure);
-      } catch (error) {
-        this.logDebug(`Error getting project structure asynchronously: ${error}`);
-        resolve({
-          error: 'Failed to get project structure',
-          scenes: 0,
-          scripts: 0,
-          assets: 0,
-          other: 0
-        });
-      }
-    });
-  }
-
-  private async handleGetProjectInfo(args: ToolArgs): Promise<ToolReply> {
-    this.logDebug(`Getting project info for: ${args.projectPath}`);
-    const godotVersion = await this.getGodotVersion();
-    const projectStructure = await this.getProjectStructureAsync(args.projectPath);
-
-    // Extract project name from project.godot file
-    let projectName = basename(args.projectPath);
-    try {
-      const projectFileContent = readFileSync(join(args.projectPath, 'project.godot'), 'utf8');
-      const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
-      if (configNameMatch && configNameMatch[1]) {
-        projectName = configNameMatch[1];
-        this.logDebug(`Found project name in config: ${projectName}`);
-      }
-    } catch (error) {
-      this.logDebug(`Error reading project file: ${error}`);
-      // Continue with default project name if extraction fails
+  private logDebug(message: string): void {
+    if (this.debugMode) {
+      console.error(`[DEBUG] ${message}`);
     }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              name: projectName,
-              path: args.projectPath,
-              godotVersion,
-              structure: projectStructure,
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    };
   }
-
-  private async handleUpdateProjectUids(args: ToolArgs): Promise<ToolReply> {
-    const ctx = this.toolContext();
-    const failure = 'Failed to update project UIDs';
-    const solutions = ['Check if the project is valid', 'Ensure you have write permissions to the project directory'];
-
-    // The editor's filesystem scan writes missing .uid files; ResourceSaver does not outside the editor
-    await importProject(ctx, args.projectPath, failure, solutions);
-    // The script scans res:// by default; args.projectPath is a disk path for --path and must not
-    // be passed as the scan root.
-    const result = await scriptOperation(ctx, 'resave_resources', {}, args.projectPath, failure, solutions);
-    return textReply(
-      `Project UIDs updated successfully. Resaved ${result.scenesResaved} scenes; ${result.scriptsChecked} scripts and shaders have UIDs.`
-    );
-  }
-
-  /**
-   * Find the Godot executable, then serve MCP requests on the given transport.
-   * Rejects when no valid Godot executable is found and strictPathValidation is on.
-   */
-  async connect(transport: Transport) {
-    this.godotPath = await findGodot({
-      configured: this.configuredGodotPath,
-      env: this.env,
-      platform: this.platform,
-      launcher: this.launcher,
-      strict: this.strictPathValidation,
-      log: (message) => this.logDebug(message),
-    });
-    this.setupToolHandlers();
-    console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
-    await this.server.connect(transport);
-  }
-}
-
-function sessionUnavailable(reason: string): ToolError {
-  return new ToolError(reason, [
-    'Runtime tools need a game started by run_project with the remote debugger attached (Godot 4.2+)',
-    'get_debug_output shows whether the debugger is attached',
-  ]);
-}
-
-/**
- * The running game's debug session; throws why runtime tools cannot use it when it is missing or
- * the game has not connected yet
- */
-function requireSession(runner: ProjectRunner): DebugSession {
-  const session = runner.debugSession();
-  if (session?.isConnected) return session;
-  throw sessionUnavailable(session ? 'The game has not connected to the debugger yet; try again in a moment' : runner.noSessionReason());
-}
-
-/** The node at an absolute path in the running game; throws if there is none */
-async function requireNode(session: DebugSession, path: string): Promise<RemoteNode> {
-  const node = await session.findNode(path);
-  if (node) return node;
-  throw new ToolError(`No node at ${path} in the running game`, [
-    `Closest paths: ${session.nearestPaths(path).join(', ')}`,
-    'Use get_scene_tree to list the nodes',
-  ]);
-}
-
-/** The node at an absolute path and its properties; throws if the node does not exist */
-async function inspectNode(session: DebugSession, path: string): Promise<{ node: RemoteNode; inspected: InspectedObject }> {
-  const node = await requireNode(session, path);
-  const inspected = await session.inspect(node.id);
-  if (!inspected) throw new ToolError(`The node at ${path} no longer exists`, ['Use get_scene_tree to list the current nodes']);
-  return { node, inspected };
-}
-
-// Runtime node paths are absolute; the leading "/" is optional for agents
-function runtimePath(path: string): string {
-  const trimmed = path.replace(/\/+$/, '');
-  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-}
-
-function countNodes(node: RemoteNode): number {
-  return 1 + node.children.reduce((total, child) => total + countNodes(child), 0);
-}
-
-/**
- * Where get_node_properties lists a property, and under which name; null for entries it leaves out:
- * editor categories and groups, script constants, the script itself, and the debugger's own
- * Node/path and Node/multiplayer_authority entries.
- */
-function listedProperty(property: RemoteProperty): { section: 'script' | 'properties'; name: string } | null {
-  const { name, usage } = property;
-  if (usage & PROPERTY_USAGE_GROUPING || name === 'script' || name.startsWith('Constants/') || name.startsWith('Node/')) return null;
-  // Members of the node's own script are "Members/<name>"; inherited ones "Members/<base.gd>/<name>"
-  if (name.startsWith('Members/')) return { section: 'script', name: name.slice('Members/'.length) };
-  if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) return { section: 'script', name };
-  if (usage & PROPERTY_USAGE_STORAGE) return { section: 'properties', name };
-  return null;
-}
-
-// A waitMs argument, bounded to 60 s
-function waitTime(value: unknown, fallback: number): number {
-  const ms = typeof value === 'number' && value >= 0 ? value : fallback;
-  return Math.min(ms, 60000);
 }

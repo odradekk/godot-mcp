@@ -45,6 +45,17 @@ export async function findGodot(options: {
   return fallback;
 }
 
+/**
+ * The version string `godot --version` reports, e.g. "4.7.2.stable.official"
+ */
+export async function readGodotVersion(launcher: GodotLauncher, godotPath: string): Promise<string> {
+  const { stdout, stderr, exitCode } = await launcher.run(godotPath, ['--version'], { timeoutMs: 10000 });
+  if (exitCode !== 0) {
+    throw new Error(`godot --version exited with code ${exitCode}: ${stderr.trim()}`);
+  }
+  return stdout.trim();
+}
+
 function installLocations(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
   switch (platform) {
     case 'darwin':

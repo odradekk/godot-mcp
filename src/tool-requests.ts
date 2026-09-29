@@ -6,7 +6,9 @@
 import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 
+import { Breakpoint } from './debug-session.js';
 import { GodotLauncher } from './godot-launcher.js';
+import { ProjectRunner } from './godot-run.js';
 
 export type ToolArgs = Record<string, any>;
 
@@ -59,13 +61,22 @@ export interface ToolDefinition {
  */
 export interface ToolContext {
   godotPath: string;
+  /** The version string `godot --version` reports */
+  godotVersion(): Promise<string>;
   launcher: GodotLauncher;
+  runner: ProjectRunner;
+  /** Kept by the server, so they apply to every run */
+  breakpoints: Map<string, Breakpoint>;
+  /** Attach Godot's remote debugger to games started by run_project */
+  remoteDebugger: boolean;
   /** Time limit for one Godot operation or import, in milliseconds */
   operationTimeoutMs: number;
   /** Attach Godot's output to failures and log debug messages */
   debugMode: boolean;
   log(message: string): void;
 }
+
+export const projectPathParam: Param = { type: 'string', description: 'Path to the Godot project directory', check: 'project' };
 
 /**
  * A failure a tool reports to the agent. The reply is the message, then the possible solutions,
