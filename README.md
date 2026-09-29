@@ -69,6 +69,7 @@ Godot MCP enables AI agents to launch the Godot editor, run projects, capture de
   - List the live scene tree, including autoloads and nodes created at runtime
   - Read a node's script variables and properties
   - Change a property or script variable while the game runs
+  - Set breakpoints, pause, step (into, over, out), read the call stack and variables of any frame, and evaluate expressions; optionally pause on script errors
 - **Get Godot Version**: Retrieve the installed Godot version
 - **List Godot Projects**: Find Godot projects in a specified directory
 - **Project Analysis**: Get detailed information about project structure
@@ -136,7 +137,13 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
         "update_project_uids",
         "get_scene_tree",
         "get_node_properties",
-        "set_node_property"
+        "set_node_property",
+        "set_breakpoint",
+        "list_breakpoints",
+        "pause_game",
+        "resume_game",
+        "get_debug_state",
+        "evaluate"
       ]
     }
   }

@@ -20,7 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
-import { DebugSession, RemoteNode, RemoteProperty } from './debug-session.js';
+import { Breakpoint, DebugSession, PauseState, RemoteNode, RemoteProperty, ResumeAction } from './debug-session.js';
 import { VariantType } from './variant.js';
 import { DebuggerSetup, ProjectRunner } from './godot-run.js';
 import { SETTABLE_TYPES, inferVariantType, jsonToVariant, variantToJson } from './runtime-values.js';
@@ -116,6 +116,8 @@ export class GodotServer {
   private server: Server;
   private runner: ProjectRunner;
   private remoteDebugger: boolean;
+  // Kept by the server, so they apply to every run
+  private breakpoints = new Map<string, Breakpoint>();
   private godotPath: string | null = null;
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
@@ -489,7 +491,7 @@ export class GodotServer {
         if ('error' in prepared) {
           return prepared.error;
         }
-        return await this.runTool(tool, prepared.args);
+        return this.withPauseNote(await this.runTool(tool, prepared.args));
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         return errorReply(`${tool.failure}: ${errorMessage}`, [
@@ -549,6 +551,10 @@ export class GodotServer {
         params: {
           projectPath,
           scene: sceneFile('Optional: Specific scene to run'),
+          breakOnError: {
+            type: 'boolean',
+            description: 'Pause the game on script errors instead of running through them, to inspect the failing frame (default: false; needs the remote debugger)',
+          },
         },
         required: ['projectPath'],
         failure: 'Failed to run Godot project',
@@ -784,6 +790,77 @@ export class GodotServer {
         failure: 'Failed to set the node property',
         handle: (args) => this.handleSetNodeProperty(args),
       },
+      {
+        name: 'set_breakpoint',
+        description:
+          'Set or clear a breakpoint at a script line. Breakpoints are kept across runs and apply to the running game at once. ' +
+          'While any is set, breakpoint statements in scripts pause the game too. Returns all breakpoints',
+        params: {
+          file: { type: 'string', description: 'Script path, relative to the project or res://', check: 'projectFile' },
+          line: { type: 'number', description: 'Line number (1-based)' },
+          enabled: { type: 'boolean', description: 'false clears the breakpoint (default: true)' },
+        },
+        required: ['file', 'line'],
+        failure: 'Failed to set the breakpoint',
+        handle: (args) => this.handleSetBreakpoint(args),
+      },
+      {
+        name: 'list_breakpoints',
+        description: 'List the breakpoints that are set',
+        params: {},
+        required: [],
+        failure: 'Failed to list breakpoints',
+        handle: async () => jsonReply({ breakpoints: [...this.breakpoints.values()] }),
+      },
+      {
+        name: 'pause_game',
+        description: 'Pause the running game and return where it stopped, the call stack and the variables of the top frame',
+        params: {},
+        required: [],
+        failure: 'Failed to pause the game',
+        handle: () => this.handlePauseGame(),
+      },
+      {
+        name: 'resume_game',
+        description:
+          'Continue or step the paused game, then wait for it to pause again. Returns the new pause state, ' +
+          '"running" if it did not pause within waitMs, or "exited"',
+        params: {
+          action: {
+            type: 'string',
+            description: 'continue (default), step (into calls), next (over calls) or out (of the current function; Godot 4.6+)',
+          },
+          waitMs: { type: 'number', description: 'How long to wait for the next pause, in ms (default: 5000, at most 60000)' },
+        },
+        required: [],
+        failure: 'Failed to resume the game',
+        handle: (args) => this.handleResumeGame(args),
+      },
+      {
+        name: 'get_debug_state',
+        description:
+          'Whether the game is running, paused or exited, with the pause state when paused. waitMs waits for the game to pause ' +
+          '(for example at a breakpoint); frame reads the variables of another stack frame',
+        params: {
+          waitMs: { type: 'number', description: 'Wait up to this many ms for a pause (default: 0, at most 60000)' },
+          frame: { type: 'number', description: 'Stack frame for the variables, 0 is the innermost (default: 0)' },
+        },
+        required: [],
+        failure: 'Failed to get the debug state',
+        handle: (args) => this.handleGetDebugState(args),
+      },
+      {
+        name: 'evaluate',
+        description:
+          'Evaluate a GDScript expression in a frame of the paused game (Godot 4.4+). Godot returns null when the expression fails',
+        params: {
+          expression: { type: 'string', description: 'Expression, e.g. "direction * speed"' },
+          frame: { type: 'number', description: 'Stack frame, 0 is the innermost (default: 0)' },
+        },
+        required: ['expression'],
+        failure: 'Failed to evaluate the expression',
+        handle: (args) => this.handleEvaluate(args),
+      },
     ];
   }
 
@@ -810,7 +887,7 @@ export class GodotServer {
     }
 
     this.logDebug(`Running Godot project: ${cmdArgs.join(' ')}`);
-    await this.runner.start(this.godotPath!, cmdArgs, await this.debuggerSetup());
+    await this.runner.start(this.godotPath!, cmdArgs, await this.debuggerSetup(args.breakOnError === true));
 
     return {
       content: [{ type: 'text', text: `Godot project started. Use get_debug_output to see its output and errors.` }],
@@ -820,7 +897,7 @@ export class GodotServer {
   /**
    * Whether run_project attaches the remote debugger, given the configuration and Godot version
    */
-  private async debuggerSetup(): Promise<DebuggerSetup> {
+  private async debuggerSetup(breakOnError: boolean): Promise<DebuggerSetup> {
     if (!this.remoteDebugger) {
       return { unavailable: 'The remote debugger is turned off in the server configuration' };
     }
@@ -837,7 +914,7 @@ export class GodotServer {
     // set_ignore_error_breaks and inspect_objects exist from 4.5; earlier versions get continue and
     // inspect_object instead
     const godot45 = godotVersionAtLeast(version, [4, 5]);
-    return { ignoreErrorBreaks: godot45, inspectObjects: godot45 };
+    return { ignoreErrorBreaks: godot45, inspectObjects: godot45, breakOnError, breakpoints: [...this.breakpoints.values()] };
   }
 
   /**
@@ -845,8 +922,9 @@ export class GodotServer {
    */
   private runtimeSession(): DebugSession | ToolReply {
     const session = this.runner.debugSession();
-    if (session instanceof DebugSession) return session;
-    return errorReply(session.unavailable, [
+    if (session instanceof DebugSession && session.isConnected) return session;
+    const reason = session instanceof DebugSession ? 'The game has not connected to the debugger yet; try again in a moment' : session.unavailable;
+    return errorReply(reason, [
       'Runtime tools need a game started by run_project with the remote debugger attached (Godot 4.2+)',
       'get_debug_output shows whether the debugger is attached',
     ]);
@@ -968,6 +1046,104 @@ export class GodotServer {
       property: args.property,
       value: updated ? variantToJson(updated.value, session.nodePathOf, updated.type) : null,
     });
+  }
+
+  /**
+   * Prepend a note to a reply while the game is paused, so the agent never leaves it paused unknowingly
+   */
+  private withPauseNote(reply: ToolReply): ToolReply {
+    const session = this.runner.debugSession();
+    if (!(session instanceof DebugSession) || !session.isPaused) return reply;
+    const top = session.pause?.stack[0];
+    const where = top ? ` at ${top.file}:${top.line} (${top.function})` : '';
+    return { ...reply, content: [{ type: 'text', text: `Game paused${where}; use resume_game to continue` }, ...reply.content] };
+  }
+
+  private async handleSetBreakpoint(args: ToolArgs): Promise<ToolReply> {
+    if (!Number.isInteger(args.line) || args.line < 1) return errorReply(`line must be a positive whole number, got ${args.line}`);
+    const breakpoint = { file: String(args.file).startsWith('res://') ? String(args.file) : `res://${args.file}`, line: args.line };
+    const enabled = args.enabled !== false;
+    const key = `${breakpoint.file}:${breakpoint.line}`;
+    if (enabled) this.breakpoints.set(key, breakpoint);
+    else this.breakpoints.delete(key);
+
+    const session = this.runner.debugSession();
+    if (session instanceof DebugSession) session.setBreakpoint(breakpoint, enabled);
+    return jsonReply({ breakpoints: [...this.breakpoints.values()] });
+  }
+
+  private async handlePauseGame(): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+    if (session.isPaused) return this.debugStateReply(session);
+    const since = session.pauseNumber;
+    session.pauseGame();
+    if (!(await session.waitForPause(since, 3000))) return errorReply('The game did not pause within 3 s');
+    return this.debugStateReply(session);
+  }
+
+  private async handleResumeGame(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+    const action = (args.action ?? 'continue') as ResumeAction;
+    if (!['continue', 'step', 'next', 'out'].includes(action)) {
+      return errorReply(`Unknown action ${action}`, ['Use continue, step, next or out']);
+    }
+    if (!session.isPaused) return errorReply('The game is not paused', ['Use pause_game, or set_breakpoint and get_debug_state with waitMs']);
+    if (action === 'out' && !godotVersionAtLeast(await this.getGodotVersion(), [4, 6])) {
+      return errorReply('Stepping out needs Godot 4.6 or later', ['Use next until the function returns']);
+    }
+    const since = session.pauseNumber;
+    session.resume(action);
+    await session.waitForPause(since, waitTime(args.waitMs, 5000));
+    return this.debugStateReply(session);
+  }
+
+  private async handleGetDebugState(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runner.debugSession();
+    if (!(session instanceof DebugSession)) {
+      // An exited game still has a state to report
+      const run = this.runner.snapshot();
+      return run && !run.running ? jsonReply({ status: 'exited', exitCode: run.exitCode }) : this.runtimeSession() as ToolReply;
+    }
+    const frame = args.frame ?? 0;
+    if (!session.isPaused && args.waitMs) await session.waitForPause(session.pauseNumber, waitTime(args.waitMs, 0));
+    else if (session.isPaused && !session.pause) await session.waitForPause(session.pauseNumber - 1, 3000);
+    if (frame !== 0) {
+      const pause = session.pause;
+      if (!pause) return errorReply('The game is not paused, so it has no stack frames to read');
+      if (!Number.isInteger(frame) || frame < 0 || frame >= pause.stack.length) {
+        return errorReply(`frame must be between 0 and ${pause.stack.length - 1}`);
+      }
+      return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
+    }
+    return this.debugStateReply(session);
+  }
+
+  private async handleEvaluate(args: ToolArgs): Promise<ToolReply> {
+    const session = this.runtimeSession();
+    if (!(session instanceof DebugSession)) return session;
+    if (!session.pause) return errorReply('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
+    if (!godotVersionAtLeast(await this.getGodotVersion(), [4, 4])) return errorReply('Evaluating expressions needs Godot 4.4 or later');
+    const frame = args.frame ?? 0;
+    try {
+      return jsonReply({ expression: args.expression, frame, value: await session.evaluate(String(args.expression), frame) });
+    } catch (error) {
+      // Godot does not answer outside a script instance's frame (e.g. in a static function)
+      return errorReply(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
+        'Godot evaluates only in frames that belong to a script instance',
+      ]);
+    }
+  }
+
+  /** The game's debug state: exited, running, or paused with the captured pause state */
+  private debugStateReply(session: DebugSession): ToolReply {
+    const run = this.runner.snapshot();
+    if (run && !run.running) return jsonReply({ status: 'exited', exitCode: run.exitCode });
+    const pause: PauseState | null = session.pause;
+    if (pause) return jsonReply({ status: 'paused', pause });
+    if (!session.isConnected) return jsonReply({ status: 'running', note: 'The game has not connected to the debugger yet' });
+    return jsonReply({ status: session.isPaused ? 'pausing' : 'running' });
   }
 
   private async handleGetDebugOutput(): Promise<ToolReply> {
@@ -1198,4 +1374,10 @@ function listedProperty(property: RemoteProperty): { section: 'script' | 'proper
   if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) return { section: 'script', name };
   if (usage & PROPERTY_USAGE_STORAGE) return { section: 'properties', name };
   return null;
+}
+
+// A waitMs argument, bounded to 60 s
+function waitTime(value: unknown, fallback: number): number {
+  const ms = typeof value === 'number' && value >= 0 ? value : fallback;
+  return Math.min(ms, 60000);
 }

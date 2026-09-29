@@ -31,7 +31,7 @@ const script = [
   '\tvar y = null', //                        13
   '\ty.bar()', //                             14
 ].join('\n') + '\n';
-const lines = { push_error: 5, push_warning: 6, script_error_ready: 8, script_error_process: 14 };
+const lines = { push_error: 5, push_warning: 6, script_error_ready: 8, script_error_process: 14, breakpoint: 12, step: 13 };
 
 const project = mkdtempSync(join(tmpdir(), 'godot-debugger-fixture-'));
 writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n');
@@ -165,10 +165,70 @@ await record(inspection, (name, data, frame, send, game) => {
   }
 });
 
+// Run 4: debug control on the #17 scenario (the player never moves because _ready resets speed):
+// a breakpoint hit with its stack, variables and an evaluation, a step, and a pause on demand
+const debugging = mkdtempSync(join(tmpdir(), 'godot-debugger-fixture-'));
+writeFileSync(join(debugging, 'project.godot'), 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n');
+writeFileSync(join(debugging, 'player.gd'), [
+  'extends Node2D', //                                   1
+  '', //                                                 2
+  '@export var speed = 120.0', //                        3
+  'var velocity = Vector2.ZERO', //                      4
+  'var direction = Vector2.RIGHT', //                    5
+  '', //                                                 6
+  'func _ready():', //                                   7
+  '\tspeed = speed if speed < 100 else 0.0', //          8
+  '\tvelocity = direction * speed', //                   9
+  '', //                                                 10
+  'func _process(delta):', //                            11
+  '\tvar step = velocity * delta', //                    12
+  '\tposition += step', //                               13
+].join('\n') + '\n');
+writeFileSync(join(debugging, 'main.tscn'), '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://player.gd" id="1"]\n\n[node name="Main" type="Node"]\n\n[node name="Player" type="Node2D" parent="."]\nscript = ExtResource("1")\n');
+
+let enters = 0;
+await record(debugging, (name, data, frame, send, game) => {
+  if (name === 'set_pid') {
+    send('set_skip_breakpoints', [false]);
+    send('breakpoint', ['res://player.gd', 12, true]);
+  } else if (name === 'debug_enter') {
+    enters++;
+    if (enters === 1) {
+      keep('debug_enter_breakpoint', frame);
+      send('get_stack_dump');
+      send('get_stack_frame_vars', [0]);
+      send('evaluate', ['direction * speed', 0]);
+      setTimeout(() => send('next'), 300);
+    } else if (enters === 2) {
+      keep('debug_enter_step', frame);
+      send('breakpoint', ['res://player.gd', 12, false]);
+      send('continue');
+      setTimeout(() => send('break'), 300);
+    } else {
+      keep('debug_enter_pause', frame);
+      send('get_stack_dump');
+      setTimeout(() => game.kill(), 300);
+    }
+  } else if (name === 'stack_dump') {
+    keep(enters === 1 ? 'stack_dump' : 'stack_dump_empty', frame);
+  } else if (name === 'stack_frame_vars') {
+    keep('stack_frame_vars', frame);
+  } else if (name === 'stack_frame_var') {
+    keep(`stack_frame_var_${data[0]}`, frame);
+  } else if (name === 'evaluation_return') {
+    keep('evaluation_return', frame);
+  } else if (name === 'debug_exit') {
+    keep('debug_exit', frame);
+  }
+});
+
 rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+rmSync(debugging, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 rmSync(inspection, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 const expected = ['set_pid', 'push_error', 'push_warning', 'script_error_ready', 'script_error_process', 'debug_enter_error',
-  'scene_tree', 'inspect_player', 'inspect_sprite', 'inspect_object_player', 'inspect_missing'];
+  'scene_tree', 'inspect_player', 'inspect_sprite', 'inspect_object_player', 'inspect_missing',
+  'debug_enter_breakpoint', 'stack_dump', 'stack_frame_vars', 'evaluation_return', 'debug_exit', 'debug_enter_step',
+  'debug_enter_pause', 'stack_dump_empty'];
 const missing = expected.filter((key) => !frames[key]);
 if (missing.length) throw new Error(`Did not record: ${missing.join(', ')}`);
 

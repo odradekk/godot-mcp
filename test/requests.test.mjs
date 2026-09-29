@@ -48,6 +48,9 @@ test('each missing required parameter is reported by name before anything runs',
     filePath: 'main.tscn',
     property: 'speed',
     value: 1,
+    file: 'player.gd',
+    line: 12,
+    expression: 'speed',
   };
   const { tools } = await client.listTools();
 

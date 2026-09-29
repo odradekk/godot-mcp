@@ -8,6 +8,7 @@
 
 import net from 'net';
 
+import { variantToJson } from './runtime-values.js';
 import { Variant, decodeVariant, encodeVariant } from './variant.js';
 
 // Distinct errors kept per run; later reports are counted but not stored
@@ -64,6 +65,33 @@ export interface InspectedObject {
   properties: RemoteProperty[];
 }
 
+export interface Breakpoint {
+  /** res:// path */
+  file: string;
+  line: number;
+}
+
+export interface StackFrame {
+  file: string;
+  line: number;
+  function: string;
+}
+
+export type ResumeAction = 'continue' | 'step' | 'next' | 'out';
+
+/** Where and why the game is paused, captured when it paused */
+export interface PauseState {
+  /** breakpoint, breakpoint statement, step, pause (pause_game) or error */
+  reason: string;
+  /** The error text, for reason "error" */
+  error?: string;
+  /** Innermost frame first; empty when the game paused outside script code */
+  stack: StackFrame[];
+  /** Stack frame the variables belong to */
+  frame: number;
+  variables: { locals: Record<string, unknown>; members: Record<string, unknown> } | null;
+}
+
 export class DebugSession {
   private server: net.Server | null = null;
   private socket: net.Socket | null = null;
@@ -83,12 +111,34 @@ export class DebugSession {
 
   constructor(
     private options: {
+      /** Godot 4.5+ has set_ignore_error_breaks; earlier versions break on every error */
       ignoreErrorBreaks: boolean;
       /** Godot 4.5+ has inspect_objects; earlier versions only the single-object inspect_object */
       inspectObjects: boolean;
+      /** Pause on script errors instead of letting the game run through them */
+      breakOnError: boolean;
+      /** Breakpoints to set when the game connects */
+      breakpoints: Breakpoint[];
       log?: (message: string) => void;
     }
-  ) {}
+  ) {
+    for (const breakpoint of options.breakpoints) this.breakpoints.set(breakpointKey(breakpoint), breakpoint);
+  }
+
+  private breakpoints = new Map<string, Breakpoint>();
+  // Pausing and stepping stop through the breakpoint path, which set_skip_breakpoints also skips,
+  // so breakpoints are skipped only while none are set and the agent is not pausing or stepping
+  private debugging = false;
+  // Thread that sent the current debug_enter, or null while running
+  private pausedThread: number | bigint | null = null;
+  // Counts pauses, so a waiter can ask for one that started after it began waiting
+  private pauseCount = 0;
+  private pauseState: PauseState | null = null;
+  private lastAction: ResumeAction | 'pause' | null = null;
+  private pauseWaiters: Array<() => void> = [];
+  // The game connected and the connection has since closed
+  private disconnected = false;
+  private frameVars: { expected: number | null; vars: Variant[][]; resolve: () => void } | null = null;
 
   get isConnected(): boolean {
     return this.connected && !!this.socket && !this.socket.destroyed;
@@ -143,6 +193,13 @@ export class DebugSession {
       }
     });
     socket.on('error', (error) => this.options.log?.(`Debugger connection error: ${error.message}`));
+    // A closed connection resumes a paused game (Godot leaves its break loop)
+    socket.on('close', () => {
+      this.disconnected = true;
+      this.pausedThread = null;
+      this.pauseState = null;
+      this.notifyPauseWaiters();
+    });
   }
 
   private receive(frame: Buffer) {
@@ -164,9 +221,11 @@ export class DebugSession {
     }
     if (!this.connected) {
       this.connected = true;
-      // Keep the game running through breakpoint statements and, where Godot allows it, errors
-      this.send('set_skip_breakpoints', [true]);
-      if (this.options.ignoreErrorBreaks) this.send('set_ignore_error_breaks', [true]);
+      // Skip breakpoint statements unless the agent set breakpoints, and, where Godot allows it,
+      // do not break on errors unless asked to
+      this.updateSkipBreakpoints();
+      for (const { file, line } of this.breakpoints.values()) this.send('breakpoint', [file, line, true]);
+      if (this.options.ignoreErrorBreaks) this.send('set_ignore_error_breaks', [!this.options.breakOnError]);
     }
 
     const args = Array.isArray(data) ? data : [];
@@ -178,9 +237,170 @@ export class DebugSession {
     if (name === 'error') {
       this.recordError(args);
     } else if (name === 'debug_enter') {
-      // Godot before 4.5 cannot be told to ignore error breaks, so answer every break at once
-      this.send('continue');
+      this.enterPause(args);
+    } else if (name === 'debug_exit') {
+      this.pausedThread = null;
+      this.pauseState = null;
+    } else if (name === 'stack_frame_vars' && this.frameVars) {
+      this.frameVars.expected = Number(args[0]);
+      if (this.frameVars.expected === 0) this.frameVars.resolve();
+    } else if (name === 'stack_frame_var' && this.frameVars) {
+      this.frameVars.vars.push(args);
+      if (this.frameVars.vars.length === this.frameVars.expected) this.frameVars.resolve();
     }
+  }
+
+  // debug_enter is [can_continue, error_text, has_stack, thread_id]
+  private enterPause(args: Variant[]) {
+    const [, text, , threadId] = args;
+    const errorText = String(text ?? '');
+    const isError = !['', 'Breakpoint', 'Breakpoint Statement'].includes(errorText);
+    const thread = typeof threadId === 'number' || typeof threadId === 'bigint' ? threadId : this.threadId;
+    if (isError && !this.options.breakOnError) {
+      // Only Godot before 4.5 breaks here: it cannot be told to ignore error breaks
+      this.send('continue', [], thread);
+      return;
+    }
+
+    const reason = isError ? 'error'
+      : errorText === 'Breakpoint Statement' ? 'breakpoint statement'
+        : errorText === '' ? 'pause'
+          : this.lastAction === 'step' || this.lastAction === 'next' || this.lastAction === 'out' ? 'step'
+            : 'breakpoint';
+    this.pausedThread = thread;
+    this.pauseState = null;
+    const pause = ++this.pauseCount;
+    this.capturePause(pause, reason, isError ? errorText : undefined);
+  }
+
+  private async capturePause(pause: number, reason: string, error?: string) {
+    let state: PauseState;
+    try {
+      const stack = await this.stackDump();
+      state = { reason, ...(error ? { error } : {}), stack, frame: 0, variables: stack.length > 0 ? await this.frameVariables(0) : null };
+    } catch (failure) {
+      this.options.log?.(`Could not read the paused game's state: ${failure instanceof Error ? failure.message : failure}`);
+      state = { reason, ...(error ? { error } : {}), stack: [], frame: 0, variables: null };
+    }
+    // The game may have resumed while the state was being read
+    if (pause !== this.pauseCount || this.pausedThread === null) return;
+    this.pauseState = state;
+    this.notifyPauseWaiters();
+  }
+
+  /** The current pause, once its state has been read; null while running */
+  get pause(): PauseState | null {
+    return this.pausedThread === null ? null : this.pauseState;
+  }
+
+  get isPaused(): boolean {
+    return this.pausedThread !== null;
+  }
+
+  /**
+   * Wait up to `timeoutMs` for a pause (with its state read) that began after `afterPause`
+   * (a value of pauseNumber), including while the game has yet to connect. Resolves with null on
+   * timeout or when the connection closes.
+   */
+  waitForPause(afterPause: number, timeoutMs: number): Promise<PauseState | null> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.pauseCount > afterPause && this.pause) return finish(this.pause);
+        if (this.disconnected) return finish(null);
+        return false;
+      };
+      const finish = (result: PauseState | null) => {
+        clearTimeout(timer);
+        this.pauseWaiters = this.pauseWaiters.filter((waiter) => waiter !== check);
+        resolve(result);
+        return true;
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      if (!check()) this.pauseWaiters.push(check);
+    });
+  }
+
+  /** Increases with every pause; pass to waitForPause to wait for the next one */
+  get pauseNumber(): number {
+    return this.pauseCount;
+  }
+
+  private notifyPauseWaiters() {
+    for (const check of [...this.pauseWaiters]) check();
+  }
+
+  /** Set or clear a breakpoint in the running game (and in later connections of this session) */
+  setBreakpoint(breakpoint: Breakpoint, enabled: boolean) {
+    if (enabled) this.breakpoints.set(breakpointKey(breakpoint), breakpoint);
+    else this.breakpoints.delete(breakpointKey(breakpoint));
+    if (!this.isConnected) return;
+    this.send('breakpoint', [breakpoint.file, breakpoint.line, enabled]);
+    this.updateSkipBreakpoints();
+  }
+
+  /** Ask the running game to pause; its state arrives with the pause (see waitForPause) */
+  pauseGame() {
+    this.debugging = true;
+    this.lastAction = 'pause';
+    this.updateSkipBreakpoints();
+    this.send('break');
+  }
+
+  /** Continue or step the paused game */
+  resume(action: ResumeAction) {
+    const thread = this.pausedThread;
+    this.debugging = action !== 'continue';
+    this.lastAction = action;
+    this.updateSkipBreakpoints();
+    this.send(action, [], thread ?? undefined);
+  }
+
+  /** Locals and members of a frame of the paused game */
+  async frameVariables(frame: number): Promise<{ locals: Record<string, unknown>; members: Record<string, unknown> }> {
+    const collected = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.frameVars = null;
+        reject(new Error(`The game did not send the variables of frame ${frame} within ${REQUEST_TIMEOUT_MS / 1000} s`));
+      }, REQUEST_TIMEOUT_MS);
+      this.frameVars = { expected: null, vars: [], resolve: () => { clearTimeout(timer); resolve(); } };
+    });
+    const vars = this.frameVars!.vars;
+    this.send('get_stack_frame_vars', [frame], this.pausedThread ?? undefined);
+    await collected;
+    this.frameVars = null;
+
+    // Each variable is [name, scope (0 local, 1 member, 2 global), type, value, type_hint]
+    const locals: Record<string, unknown> = {};
+    const members: Record<string, unknown> = {};
+    for (const [name, scope, type, value] of vars) {
+      if (name === 'self' || Number(scope) > 1) continue;
+      (Number(scope) === 0 ? locals : members)[String(name)] = variantToJson(value, this.nodePathOf, Number(type));
+    }
+    return { locals, members };
+  }
+
+  /**
+   * Evaluate an expression in a frame of the paused game (Godot 4.4+). Godot returns null when the
+   * expression fails, and does not answer at all outside a script instance's frame.
+   */
+  async evaluate(expression: string, frame: number): Promise<unknown> {
+    const { data } = await this.request('evaluate', [expression, frame], ['evaluation_return'], this.pausedThread ?? undefined);
+    // [expression, scope, type, value, type_hint]
+    return variantToJson(data[3], this.nodePathOf, Number(data[2]));
+  }
+
+  private async stackDump(): Promise<StackFrame[]> {
+    const { data } = await this.request('get_stack_dump', [], ['stack_dump'], this.pausedThread ?? undefined);
+    // [frame_count * 3, file, line, function, ...]
+    const frames: StackFrame[] = [];
+    for (let at = 1; at + 2 < data.length && at < Number(data[0]); at += 3) {
+      frames.push({ file: String(data[at]), line: Number(data[at + 1]), function: String(data[at + 2]) });
+    }
+    return frames;
+  }
+
+  private updateSkipBreakpoints() {
+    this.send('set_skip_breakpoints', [this.breakpoints.size === 0 && !this.debugging]);
   }
 
   /**
@@ -276,7 +496,7 @@ export class DebugSession {
   /**
    * Send a message and resolve with the first later message named one of `replyNames`.
    */
-  private request(name: string, data: unknown[], replyNames: string[]): Promise<{ name: string; data: Variant[] }> {
+  private request(name: string, data: unknown[], replyNames: string[], threadId?: number | bigint): Promise<{ name: string; data: Variant[] }> {
     if (!this.isConnected) return Promise.reject(new Error('The game is not connected to the debugger'));
     return new Promise((resolve, reject) => {
       const waiter = {
@@ -291,13 +511,13 @@ export class DebugSession {
         reject(new Error(`The game did not answer ${name} within ${REQUEST_TIMEOUT_MS / 1000} s`));
       }, REQUEST_TIMEOUT_MS);
       this.waiters.push(waiter);
-      this.send(name, data);
+      this.send(name, data, threadId);
     });
   }
 
-  private send(name: string, data: unknown[] = []) {
+  private send(name: string, data: unknown[] = [], threadId: number | bigint = this.threadId) {
     if (!this.socket || this.socket.destroyed) return;
-    const body = encodeVariant([name, this.threadId, data]);
+    const body = encodeVariant([name, threadId, data]);
     const length = Buffer.alloc(4);
     length.writeUInt32LE(body.length);
     this.socket.write(Buffer.concat([length, body]));
@@ -340,4 +560,8 @@ export class DebugSession {
       lastSeenMs: now,
     });
   }
+}
+
+function breakpointKey({ file, line }: Breakpoint): string {
+  return `${file}:${line}`;
 }
