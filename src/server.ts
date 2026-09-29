@@ -21,7 +21,50 @@ import {
 
 import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
 
-const GODOT_DEBUG_MODE: boolean = true; // Always use GODOT DEBUG MODE
+const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
+const OPERATION_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
+// Lines of Godot output attached to failure replies
+const LOG_TAIL_LINES = 40;
+// Prefix of the stdout line on which godot_operations.gd reports its outcome
+const RESULT_MARKER = '@@GODOT_MCP_RESULT@@ ';
+
+/**
+ * Outcome of one run of godot_operations.gd. `log` is the rest of Godot's output.
+ */
+type OperationOutcome =
+  | { ok: true; result: any; log: string }
+  | { ok: false; error: string; log: string };
+
+function lastLines(text: string, count: number): string {
+  return text.trim().split(/\r?\n/).slice(-count).join('\n');
+}
+
+function withStderrTail(message: string, stderr: string): string {
+  const tail = lastLines(stderr, LOG_TAIL_LINES);
+  return tail ? `${message}. Godot stderr:\n${tail}` : message;
+}
+
+/**
+ * Interpret a finished run of godot_operations.gd. The last result line on stdout decides the
+ * outcome, whatever the exit code; a run without one (Godot crashed or failed before the script
+ * could report) is a failure.
+ */
+function readOperationOutcome({ stdout, stderr, exitCode }: { stdout: string; stderr: string; exitCode: number }): OperationOutcome {
+  const lines = stdout.split(/\r?\n/);
+  const reports = lines.filter((line) => line.startsWith(RESULT_MARKER));
+  const log = [...lines.filter((line) => !line.startsWith(RESULT_MARKER)), stderr].join('\n').trim();
+
+  const report = reports.pop();
+  if (report === undefined) {
+    return { ok: false, error: withStderrTail(`Godot exited with code ${exitCode} without reporting a result`, stderr), log };
+  }
+  try {
+    const outcome = JSON.parse(report.slice(RESULT_MARKER.length));
+    return outcome.ok ? { ok: true, result: outcome.result, log } : { ok: false, error: String(outcome.error), log };
+  } catch {
+    return { ok: false, error: `Godot reported an unreadable result: ${report}`, log };
+  }
+}
 
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -53,6 +96,8 @@ export interface GodotServerConfig {
   env?: NodeJS.ProcessEnv;
   /** Starts Godot processes. Defaults to child_process. */
   launcher?: GodotLauncher;
+  /** Time limit for one Godot operation or import, in milliseconds. Defaults to 5 minutes. */
+  operationTimeoutMs?: number;
 }
 
 /**
@@ -76,6 +121,7 @@ export class GodotServer {
   private platform: NodeJS.Platform;
   private env: NodeJS.ProcessEnv;
   private launcher: GodotLauncher;
+  private operationTimeoutMs: number;
 
   /**
    * Parameter name mappings between snake_case and camelCase
@@ -115,6 +161,7 @@ export class GodotServer {
     this.launcher = config.launcher ?? nodeLauncher;
     this.debugMode = config.debugMode ?? this.env.DEBUG === 'true';
     this.strictPathValidation = config.strictPathValidation ?? false;
+    this.operationTimeoutMs = config.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
 
     // Validated with --version when the server connects; an invalid path falls back to detection
     if (config.godotPath) {
@@ -428,13 +475,13 @@ export class GodotServer {
    * @param operation The operation to execute
    * @param params The parameters for the operation
    * @param projectPath The path to the Godot project
-   * @returns The stdout, stderr, and exit code of the operation
+   * @returns The result the operation reported, or why it failed
    */
   private async executeOperation(
     operation: string,
     params: OperationParams,
     projectPath: string
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<OperationOutcome> {
     this.logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     this.logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
@@ -460,13 +507,43 @@ export class GodotServer {
     ];
 
 
-    if (GODOT_DEBUG_MODE) {
+    if (this.debugMode) {
       args.push('--debug-godot');
     }
 
     this.logDebug(`Executing: ${this.godotPath} ${args.join(' ')}`);
 
-    return this.launcher.run(this.godotPath!, args);
+    try {
+      return readOperationOutcome(await this.launcher.run(this.godotPath!, args, {
+        timeoutMs: this.operationTimeoutMs,
+        maxBufferBytes: OPERATION_OUTPUT_LIMIT_BYTES,
+      }));
+    } catch (error: unknown) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error), log: '' };
+    }
+  }
+
+  /**
+   * Build the tool reply for an operation outcome. Success text comes from `render(result)`;
+   * failures lead with the operation's own message, and include Godot's output in debug mode.
+   */
+  private operationReply(
+    outcome: OperationOutcome,
+    failurePrefix: string,
+    possibleSolutions: string[],
+    render: (result: any) => string
+  ) {
+    if (outcome.ok) {
+      return { content: [{ type: 'text', text: render(outcome.result) }] };
+    }
+    const response = this.createErrorResponse(`${failurePrefix}: ${outcome.error}`, possibleSolutions);
+    if (this.debugMode && outcome.log) {
+      response.content.push({
+        type: 'text',
+        text: `Godot output (last ${LOG_TAIL_LINES} lines):\n${lastLines(outcome.log, LOG_TAIL_LINES)}`,
+      });
+    }
+    return response;
   }
 
   /**
@@ -1353,27 +1430,17 @@ export class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('create_scene', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to create scene: ${stderr}`,
-          [
-            'Check if the root node type is valid',
-            'Ensure you have write permissions to the scene path',
-            'Verify the scene path is valid',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Scene created successfully at: ${args.scenePath}\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('create_scene', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to create scene',
+        [
+          'Check if the root node type is valid',
+          'Ensure you have write permissions to the scene path',
+          'Verify the scene path is valid',
         ],
-      };
+        (result) => `Scene created successfully at: ${result.scenePath}`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to create scene: ${error?.message || 'Unknown error'}`,
@@ -1456,27 +1523,17 @@ export class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('add_node', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to add node: ${stderr}`,
-          [
-            'Check if the node type is valid',
-            'Ensure the parent node path exists',
-            'Verify the scene file is valid',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Node '${args.nodeName}' of type '${args.nodeType}' added successfully to '${args.scenePath}'.\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('add_node', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to add node',
+        [
+          'Check if the node type is valid',
+          'Ensure the parent node path exists',
+          'Verify the scene file is valid',
         ],
-      };
+        (result) => `Node '${args.nodeName}' of type '${result.nodeType}' added successfully at ${result.nodePath} in '${result.scenePath}'.`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to add node: ${error?.message || 'Unknown error'}`,
@@ -1560,27 +1617,17 @@ export class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('load_sprite', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to load sprite: ${stderr}`,
-          [
-            'Check if the node path is correct',
-            'Ensure the node is a Sprite2D, Sprite3D, or TextureRect',
-            'Verify the texture file is a valid image format',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Sprite loaded successfully with texture: ${args.texturePath}\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('load_sprite', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to load sprite',
+        [
+          'Check if the node path is correct',
+          'Ensure the node is a Sprite2D, Sprite3D, or TextureRect',
+          'Verify the texture file is a valid image format',
         ],
-      };
+        (result) => `Sprite loaded successfully with texture: ${result.texturePath} on ${result.nodePath} in '${result.scenePath}'.`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to load sprite: ${error?.message || 'Unknown error'}`,
@@ -1655,27 +1702,17 @@ export class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('export_mesh_library', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to export mesh library: ${stderr}`,
-          [
-            'Check if the scene contains valid 3D meshes',
-            'Ensure the output path is valid',
-            'Verify the scene file is valid',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `MeshLibrary exported successfully to: ${args.outputPath}\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('export_mesh_library', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to export mesh library',
+        [
+          'Check if the scene contains valid 3D meshes',
+          'Ensure the output path is valid',
+          'Verify the scene file is valid',
         ],
-      };
+        (result) => `MeshLibrary exported successfully to: ${result.outputPath} (${result.items.length} items: ${result.items.join(', ')})`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to export mesh library: ${error?.message || 'Unknown error'}`,
@@ -1753,28 +1790,17 @@ export class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('save_scene', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to save scene: ${stderr}`,
-          [
-            'Check if the scene file is valid',
-            'Ensure you have write permissions to the output path',
-            'Verify the scene can be properly packed',
-          ]
-        );
-      }
-
-      const savePath = args.newPath || args.scenePath;
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Scene saved successfully to: ${savePath}\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('save_scene', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to save scene',
+        [
+          'Check if the scene file is valid',
+          'Ensure you have write permissions to the output path',
+          'Verify the scene can be properly packed',
         ],
-      };
+        (result) => `Scene saved successfully to: ${result.scenePath}`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to save scene: ${error?.message || 'Unknown error'}`,
@@ -1849,26 +1875,16 @@ export class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr, exitCode } = await this.executeOperation('get_uid', params, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to get UID: ${stderr}`,
-          [
-            'Check if the file is a valid Godot resource',
-            'Ensure the file path is correct',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `UID for ${args.filePath}: ${stdout.trim()}`,
-          },
+      const outcome = await this.executeOperation('get_uid', params, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to get UID',
+        [
+          'Check if the file is a valid Godot resource',
+          'Ensure the file path is correct',
         ],
-      };
+        (result) => JSON.stringify(result, null, 2)
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to get UID: ${error?.message || 'Unknown error'}`,
@@ -1930,33 +1946,36 @@ export class GodotServer {
 
       // Missing .uid files are generated by the editor's filesystem scan. ResourceSaver does not
       // write them when the operations script runs outside the editor.
-      const importResult = await this.launcher.run(this.godotPath!, ['--headless', '--path', args.projectPath, '--import']);
+      const importResult = await this.launcher.run(
+        this.godotPath!,
+        ['--headless', '--path', args.projectPath, '--import'],
+        { timeoutMs: this.operationTimeoutMs, maxBufferBytes: OPERATION_OUTPUT_LIMIT_BYTES }
+      );
       if (importResult.exitCode !== 0) {
-        throw new Error(`Godot import exited with code ${importResult.exitCode}: ${importResult.stderr.trim()}`);
+        return this.operationReply(
+          {
+            ok: false,
+            error: withStderrTail(`Godot import exited with code ${importResult.exitCode}`, importResult.stderr),
+            log: `${importResult.stdout}\n${importResult.stderr}`.trim(),
+          },
+          'Failed to update project UIDs',
+          ['Check if the project is valid', 'Ensure you have write permissions to the project directory'],
+          () => ''
+        );
       }
 
       // Execute the operation. The script scans res:// by default; args.projectPath is a disk path
       // for --path and must not be passed as the scan root.
-      const { stdout, stderr, exitCode } = await this.executeOperation('resave_resources', {}, args.projectPath);
-
-      if (exitCode !== 0) {
-        return this.createErrorResponse(
-          `Failed to update project UIDs: ${stderr}`,
-          [
-            'Check if the project is valid',
-            'Ensure you have write permissions to the project directory',
-          ]
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Project UIDs updated successfully.\n\nOutput: ${stdout}`,
-          },
+      const outcome = await this.executeOperation('resave_resources', {}, args.projectPath);
+      return this.operationReply(
+        outcome,
+        'Failed to update project UIDs',
+        [
+          'Check if the project is valid',
+          'Ensure you have write permissions to the project directory',
         ],
-      };
+        (result) => `Project UIDs updated successfully. Resaved ${result.scenesResaved} scenes; ${result.scriptsChecked} scripts and shaders have UIDs.`
+      );
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to update project UIDs: ${error?.message || 'Unknown error'}`,

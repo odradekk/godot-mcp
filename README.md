@@ -199,7 +199,7 @@ For any MCP-compatible client, use this configuration:
 | Variable | Description |
 |----------|-------------|
 | `GODOT_PATH` | Path to the Godot executable (overrides automatic detection) |
-| `DEBUG` | Set to `"true"` to enable detailed server-side debug logging |
+| `DEBUG` | Set to `"true"` to enable detailed server-side debug logging, run Godot operations with verbose output, and include that output in failed tool replies |
 
 <details>
 <summary><strong>Building from Source</strong></summary>
