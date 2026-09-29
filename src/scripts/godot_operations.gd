@@ -176,144 +176,62 @@ func instantiate_class(name_of_class):
     
     return result
 
-# Create a new scene with a specified root node type
-func create_scene(params):
-    # Normalize the scene path
-    var full_scene_path = params.scenePath
-    if not full_scene_path.begins_with("res://"):
-        full_scene_path = "res://" + full_scene_path
-    var absolute_scene_path = ProjectSettings.globalize_path(full_scene_path)
-    log_debug("Scene path: " + full_scene_path + " (" + absolute_scene_path + ")")
-    
-    var root_node_type = "Node2D"  # Default value
-    if params.has("rootNodeType"):
-        root_node_type = params.rootNodeType
-    
-    # Create the root node
-    var scene_root = instantiate_class(root_node_type)
-    if not scene_root:
-        return fail("Failed to instantiate node of type: " + root_node_type + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
-    scene_root.name = "root"
-    # Set the owner of the root node to itself (important for scene saving)
-    scene_root.owner = scene_root
-    
-    var packed_scene = PackedScene.new()
-    var result = packed_scene.pack(scene_root)
-    if result != OK:
-        return fail("Failed to pack scene: " + error_string(result))
-    
-    # Create the scene directory if needed
-    var scene_dir_abs = absolute_scene_path.get_base_dir()
-    if not DirAccess.dir_exists_absolute(scene_dir_abs):
-        log_debug("Creating directory: " + scene_dir_abs)
-        var make_dir_error = DirAccess.make_dir_recursive_absolute(scene_dir_abs)
-        if make_dir_error != OK:
-            return fail("Failed to create directory: " + scene_dir_abs + ", error: " + error_string(make_dir_error))
-    
-    var save_error = ResourceSaver.save(packed_scene, full_scene_path)
-    if save_error != OK:
-        return fail("Failed to save scene " + full_scene_path + ": " + error_string(save_error))
-    if not FileAccess.file_exists(full_scene_path):
-        return fail("Scene reported as saved but does not exist at: " + full_scene_path)
-    
-    ok({"scenePath": full_scene_path, "rootNodeType": root_node_type})
+# --- Scene editing ---
+# Shared by the scene operations. On failure these call fail(...) and return null or false,
+# so the calling operation only needs to return.
 
-# Add a node to an existing scene
-func add_node(params):
-    print("Adding node to scene: " + params.scenePath)
-    
-    var full_scene_path = params.scenePath
-    if not full_scene_path.begins_with("res://"):
-        full_scene_path = "res://" + full_scene_path
-    if debug_mode:
-        print("Scene path (with res://): " + full_scene_path)
-    
-    var absolute_scene_path = ProjectSettings.globalize_path(full_scene_path)
-    if debug_mode:
-        print("Absolute scene path: " + absolute_scene_path)
-    
-    if not FileAccess.file_exists(absolute_scene_path):
-        return fail("Scene file does not exist at: " + absolute_scene_path)
-    
-    var scene = load(full_scene_path)
-    if not scene:
-        return fail("Failed to load scene: " + full_scene_path)
-    
-    if debug_mode:
-        print("Scene loaded successfully")
-    var scene_root = scene.instantiate()
-    if debug_mode:
-        print("Scene instantiated")
-    
-    # Use traditional if-else statement for better compatibility
-    var parent_path = "root"  # Default value
-    if params.has("parentNodePath"):
-        parent_path = params.parentNodePath
-    if debug_mode:
-        print("Parent path: " + parent_path)
-    
-    var parent = scene_root
-    if parent_path != "root":
-        parent = scene_root.get_node(parent_path.replace("root/", ""))
-        if not parent:
-            return fail("Parent node not found: " + parent_path)
-    if debug_mode:
-        print("Parent node found: " + parent.name)
-    
-    if debug_mode:
-        print("Instantiating node of type: " + params.nodeType)
-    var new_node = instantiate_class(params.nodeType)
-    if not new_node:
-        return fail("Failed to instantiate node of type: " + params.nodeType + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
-    new_node.name = params.nodeName
-    if debug_mode:
-        print("New node created with name: " + new_node.name)
-    
-    if params.has("properties"):
-        if debug_mode:
-            print("Setting properties on node")
-        var properties = params.properties
-        for property in properties:
-            if debug_mode:
-                print("Setting property: " + property + " = " + str(properties[property]))
-            var value = properties[property]
-            var property_type = get_property_type(new_node, property)
-            if property_type == -1:
-                return fail("Unknown property '" + property + "' on node type: " + params.nodeType)
-            if typeof(value) == TYPE_STRING and value.begins_with("res://"):
-                value = load(value)
-                if debug_mode:
-                    print("Loaded resource for property: " + property + " -> " + str(value))
-            elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
-                value = dictionary_to_type(value, property_type)
-                if value == null:
-                    return fail("Cannot convert " + JSON.stringify(properties[property]) + " to " + type_string(property_type) + " for property: " + property)
-            new_node.set(property, value)
-    
-    parent.add_child(new_node)
-    new_node.owner = scene_root
-    if debug_mode:
-        print("Node added to parent and ownership set")
-    
-    var packed_scene = PackedScene.new()
-    var result = packed_scene.pack(scene_root)
-    if result != OK:
-        return fail("Failed to pack scene: " + error_string(result))
-    var save_error = ResourceSaver.save(packed_scene, absolute_scene_path)
-    if save_error != OK:
-        return fail("Failed to save scene " + full_scene_path + ": " + error_string(save_error))
+# `path` relative to the project, or already a res:// path
+func to_res_path(path):
+    return path if path.begins_with("res://") else "res://" + path
 
-    ok({
-        "scenePath": full_scene_path,
-        "nodePath": scene_node_path(scene_root, new_node),
-        "nodeType": params.nodeType,
-    })
+# Load a scene file and instantiate it. Returns the scene's root node.
+func load_scene_root(path):
+    var res_path = to_res_path(path)
+    if not FileAccess.file_exists(res_path):
+        return fail("Scene file does not exist: " + res_path)
+    var scene = load(res_path)
+    if not scene is PackedScene:
+        return fail("Not a scene file: " + res_path)
+    return scene.instantiate()
+
+# Find a node by the path the tools accept: "" or "root" is the scene root; otherwise a leading
+# "root/" is removed once and the rest is relative to the scene root.
+func find_scene_node(scene_root, node_path, scene_path):
+    var relative = node_path
+    if relative == "root":
+        relative = ""
+    elif relative.begins_with("root/"):
+        relative = relative.substr(5)
+    var node = scene_root if relative == "" else scene_root.get_node_or_null(relative)
+    if not node:
+        return fail("Node not found in " + to_res_path(scene_path) + ": " + node_path)
+    return node
 
 # Path of `node` in the "root/..." form the tools accept
 func scene_node_path(scene_root, node):
     if node == scene_root:
         return "root"
     return "root/" + str(scene_root.get_path_to(node))
+
+# Set properties given as JSON: res:// strings load the resource, and objects such as
+# {"x": 1, "y": 2} are converted to the property's Vector or Color type.
+func set_node_properties(node, properties):
+    for property in properties:
+        var value = properties[property]
+        var property_type = get_property_type(node, property)
+        if property_type == -1:
+            fail("Unknown property '" + property + "' on node type: " + node.get_class())
+            return false
+        if typeof(value) == TYPE_STRING and value.begins_with("res://"):
+            value = load(value)
+        elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
+            value = dictionary_to_type(value, property_type)
+            if value == null:
+                fail("Cannot convert " + JSON.stringify(properties[property]) + " to " + type_string(property_type) + " for property: " + property)
+                return false
+        log_debug("Setting property: " + property + " = " + str(value))
+        node.set(property, value)
+    return true
 
 # Returns the declared Variant type of a property, or -1 if the object has no such property
 func get_property_type(obj, property):
@@ -322,282 +240,147 @@ func get_property_type(obj, property):
             return p.type
     return -1
 
-# JSON has no vector or color types, and Node.set() silently ignores a Dictionary it cannot
-# convert, so {"x", "y"[, "z"]} and {"r", "g", "b"[, "a"]} objects are converted explicitly.
-# Returns null when the dictionary does not fit the target type.
+# Convert a JSON object to a vector or color, or return null if it does not fit the type
 func dictionary_to_type(value, type):
     match type:
         TYPE_VECTOR2, TYPE_VECTOR2I:
-            if value.has_all(["x", "y"]):
+            if value.has("x") and value.has("y"):
                 return type_convert(Vector2(value.x, value.y), type)
         TYPE_VECTOR3, TYPE_VECTOR3I:
-            if value.has_all(["x", "y", "z"]):
+            if value.has("x") and value.has("y") and value.has("z"):
                 return type_convert(Vector3(value.x, value.y, value.z), type)
         TYPE_COLOR:
-            if value.has_all(["r", "g", "b"]):
+            if value.has("r") and value.has("g") and value.has("b"):
                 return Color(value.r, value.g, value.b, value.get("a", 1.0))
     return null
 
-# Load a sprite into a Sprite2D node
-func load_sprite(params):
-    print("Loading sprite into scene: " + params.scenePath)
-    
-    # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scenePath
-    if not full_scene_path.begins_with("res://"):
-        full_scene_path = "res://" + full_scene_path
-    
-    if debug_mode:
-        print("Full scene path (with res://): " + full_scene_path)
-    
-    # Check if the scene file exists
-    var file_check = FileAccess.file_exists(full_scene_path)
-    if debug_mode:
-        print("Scene file exists check: " + str(file_check))
-    
-    if not file_check:
-        return fail("Scene file does not exist at: " + full_scene_path)
-    
-    # Ensure the texture path starts with res:// for Godot's resource system
-    var full_texture_path = params.texturePath
-    if not full_texture_path.begins_with("res://"):
-        full_texture_path = "res://" + full_texture_path
-    
-    if debug_mode:
-        print("Full texture path (with res://): " + full_texture_path)
-    
-    # Load the scene
-    var scene = load(full_scene_path)
-    if not scene:
-        return fail("Failed to load scene: " + full_scene_path)
-    
-    if debug_mode:
-        print("Scene loaded successfully")
-    
-    # Instance the scene
-    var scene_root = scene.instantiate()
-    if debug_mode:
-        print("Scene instantiated")
-    
-    # Find the sprite node
-    var node_path = params.nodePath
-    if debug_mode:
-        print("Original node path: " + node_path)
-    
-    if node_path.begins_with("root/"):
-        node_path = node_path.substr(5)  # Remove "root/" prefix
-        if debug_mode:
-            print("Node path after removing 'root/' prefix: " + node_path)
-    
-    var sprite_node = null
-    if node_path == "":
-        # If no node path, assume root is the sprite
-        sprite_node = scene_root
-        if debug_mode:
-            print("Using root node as sprite node")
-    else:
-        sprite_node = scene_root.get_node(node_path)
-        if sprite_node and debug_mode:
-            print("Found sprite node: " + sprite_node.name)
-    
-    if not sprite_node:
-        return fail("Node not found: " + params.nodePath)
-    
-    # Check if the node is a Sprite2D or compatible type
-    if debug_mode:
-        print("Node class: " + sprite_node.get_class())
-    if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
-        return fail("Node is not a sprite-compatible type: " + sprite_node.get_class())
-    
-    # Load the texture
-    if debug_mode:
-        print("Loading texture from: " + full_texture_path)
-    var texture = load(full_texture_path)
-    if not texture:
-        return fail("Failed to load texture: " + full_texture_path)
-    
-    if debug_mode:
-        print("Texture loaded successfully")
-    
-    # Set the texture on the sprite
-    if sprite_node is Sprite2D or sprite_node is Sprite3D:
-        sprite_node.texture = texture
-        if debug_mode:
-            print("Set texture on Sprite2D/Sprite3D node")
-    elif sprite_node is TextureRect:
-        sprite_node.texture = texture
-        if debug_mode:
-            print("Set texture on TextureRect node")
-    
-    # Save the modified scene
-    var packed_scene = PackedScene.new()
-    var result = packed_scene.pack(scene_root)
-    if result != OK:
-        return fail("Failed to pack scene: " + error_string(result))
-    var error = ResourceSaver.save(packed_scene, full_scene_path)
-    if error != OK:
-        return fail("Failed to save scene " + full_scene_path + ": " + error_string(error))
+# Save a resource, creating its directory if needed
+func save_resource(resource, path):
+    var res_path = to_res_path(path)
+    var dir = ProjectSettings.globalize_path(res_path.get_base_dir())
+    if not DirAccess.dir_exists_absolute(dir):
+        log_debug("Creating directory: " + dir)
+        var dir_error = DirAccess.make_dir_recursive_absolute(dir)
+        if dir_error != OK:
+            fail("Failed to create directory " + dir + ": " + error_string(dir_error))
+            return false
+    var save_error = ResourceSaver.save(resource, res_path)
+    if save_error != OK:
+        fail("Failed to save " + res_path + ": " + error_string(save_error))
+        return false
+    return true
 
+# Pack a scene's nodes (those owned by scene_root) and save them
+func save_scene_root(scene_root, path):
+    var packed_scene = PackedScene.new()
+    var pack_error = packed_scene.pack(scene_root)
+    if pack_error != OK:
+        fail("Failed to pack scene: " + error_string(pack_error))
+        return false
+    return save_resource(packed_scene, path)
+
+# --- Scene operations ---
+
+func create_scene(params):
+    var root_node_type = params.get("rootNodeType", "Node2D")
+    var scene_root = instantiate_class(root_node_type)
+    if not scene_root:
+        return fail("Failed to instantiate node of type: " + root_node_type + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
+    scene_root.name = "root"
+    if not save_scene_root(scene_root, params.scenePath):
+        return
+    ok({"scenePath": to_res_path(params.scenePath), "rootNodeType": root_node_type})
+
+# Add a node to an existing scene
+func add_node(params):
+    var scene_root = load_scene_root(params.scenePath)
+    if not scene_root:
+        return
+    var parent = find_scene_node(scene_root, params.get("parentNodePath", "root"), params.scenePath)
+    if not parent:
+        return
+    var new_node = instantiate_class(params.nodeType)
+    if not new_node:
+        return fail("Failed to instantiate node of type: " + params.nodeType + ". It must be a Godot class that can be instantiated or a global script class (class_name).")
+    new_node.name = params.nodeName
+    if params.has("properties") and not set_node_properties(new_node, params.properties):
+        return
+    parent.add_child(new_node)
+    new_node.owner = scene_root
+    if not save_scene_root(scene_root, params.scenePath):
+        return
     ok({
-        "scenePath": full_scene_path,
-        "nodePath": scene_node_path(scene_root, sprite_node),
-        "texturePath": full_texture_path,
+        "scenePath": to_res_path(params.scenePath),
+        "nodePath": scene_node_path(scene_root, new_node),
+        "nodeType": params.nodeType,
     })
 
-# Export a scene as a MeshLibrary resource
+# Set the texture of a Sprite2D, Sprite3D or TextureRect node
+func load_sprite(params):
+    var scene_root = load_scene_root(params.scenePath)
+    if not scene_root:
+        return
+    var sprite_node = find_scene_node(scene_root, params.nodePath, params.scenePath)
+    if not sprite_node:
+        return
+    if not (sprite_node is Sprite2D or sprite_node is Sprite3D or sprite_node is TextureRect):
+        return fail("Node is not a sprite-compatible type: " + sprite_node.get_class())
+    var texture_path = to_res_path(params.texturePath)
+    var texture = load(texture_path)
+    if not texture is Texture2D:
+        return fail("Failed to load texture: " + texture_path)
+    sprite_node.texture = texture
+    if not save_scene_root(scene_root, params.scenePath):
+        return
+    ok({
+        "scenePath": to_res_path(params.scenePath),
+        "nodePath": scene_node_path(scene_root, sprite_node),
+        "texturePath": texture_path,
+    })
+
+# Export a scene as a MeshLibrary resource: one item per child that is, or directly contains,
+# a MeshInstance3D with a mesh
 func export_mesh_library(params):
-    print("Exporting MeshLibrary from scene: " + params.scenePath)
-    
-    # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scenePath
-    if not full_scene_path.begins_with("res://"):
-        full_scene_path = "res://" + full_scene_path
-    
-    if debug_mode:
-        print("Full scene path (with res://): " + full_scene_path)
-    
-    # Ensure the output path starts with res:// for Godot's resource system
-    var full_output_path = params.outputPath
-    if not full_output_path.begins_with("res://"):
-        full_output_path = "res://" + full_output_path
-    
-    if debug_mode:
-        print("Full output path (with res://): " + full_output_path)
-    
-    # Check if the scene file exists
-    var file_check = FileAccess.file_exists(full_scene_path)
-    if debug_mode:
-        print("Scene file exists check: " + str(file_check))
-    
-    if not file_check:
-        return fail("Scene file does not exist at: " + full_scene_path)
-    
-    # Load the scene
-    if debug_mode:
-        print("Loading scene from: " + full_scene_path)
-    var scene = load(full_scene_path)
-    if not scene:
-        return fail("Failed to load scene: " + full_scene_path)
-    
-    if debug_mode:
-        print("Scene loaded successfully")
-    
-    # Instance the scene
-    var scene_root = scene.instantiate()
-    if debug_mode:
-        print("Scene instantiated")
-    
-    # Create a new MeshLibrary
+    var scene_root = load_scene_root(params.scenePath)
+    if not scene_root:
+        return
+    var mesh_item_names = params.get("meshItemNames", [])
     var mesh_library = MeshLibrary.new()
-    if debug_mode:
-        print("Created new MeshLibrary")
-    
-    # Get mesh item names if provided
-    var mesh_item_names = params.meshItemNames if params.has("meshItemNames") else []
-    var use_specific_items = mesh_item_names.size() > 0
-    
-    if debug_mode:
-        if use_specific_items:
-            print("Using specific mesh items: " + str(mesh_item_names))
-        else:
-            print("Using all mesh items in the scene")
-    
-    # Process all child nodes
     var item_id = 0
-    if debug_mode:
-        print("Processing child nodes...")
-    
+
     for child in scene_root.get_children():
-        if debug_mode:
-            print("Checking child node: " + child.name)
-        
-        # Skip if not using all items and this item is not in the list
-        if use_specific_items and not (child.name in mesh_item_names):
-            if debug_mode:
-                print("Skipping node " + child.name + " (not in specified items list)")
+        if mesh_item_names.size() > 0 and not (child.name in mesh_item_names):
             continue
-            
-        # Check if the child has a mesh
-        var mesh_instance = null
-        if child is MeshInstance3D:
-            mesh_instance = child
-            if debug_mode:
-                print("Node " + child.name + " is a MeshInstance3D")
-        else:
-            # Try to find a MeshInstance3D in the child's descendants
-            if debug_mode:
-                print("Searching for MeshInstance3D in descendants of " + child.name)
+
+        var mesh_instance = child if child is MeshInstance3D else null
+        if not mesh_instance:
             for descendant in child.get_children():
                 if descendant is MeshInstance3D:
                     mesh_instance = descendant
-                    if debug_mode:
-                        print("Found MeshInstance3D in descendant: " + descendant.name)
                     break
-        
-        if mesh_instance and mesh_instance.mesh:
-            if debug_mode:
-                print("Adding mesh: " + child.name)
-            
-            # Add the mesh to the library
-            mesh_library.create_item(item_id)
-            mesh_library.set_item_name(item_id, child.name)
-            mesh_library.set_item_mesh(item_id, mesh_instance.mesh)
-            if debug_mode:
-                print("Added mesh to library with ID: " + str(item_id))
-            
-            # Add collision shape if available
-            var collision_added = false
-            for collision_child in child.get_children():
-                if collision_child is CollisionShape3D and collision_child.shape:
-                    mesh_library.set_item_shapes(item_id, [collision_child.shape])
-                    if debug_mode:
-                        print("Added collision shape from: " + collision_child.name)
-                    collision_added = true
-                    break
-            
-            if debug_mode and not collision_added:
-                print("No collision shape found for mesh: " + child.name)
-            
-            # Add preview if available
-            if mesh_instance.mesh:
-                mesh_library.set_item_preview(item_id, mesh_instance.mesh)
-                if debug_mode:
-                    print("Added preview for mesh: " + child.name)
-            
-            item_id += 1
-        elif debug_mode:
-            print("Node " + child.name + " has no valid mesh")
-    
-    if debug_mode:
-        print("Processed " + str(item_id) + " meshes")
-    
-    # Create directory if it doesn't exist
-    var dir = DirAccess.open("res://")
-    if dir == null:
-        return fail("Failed to open res:// directory, error: " + str(DirAccess.get_open_error()))
-        
-    var output_dir = full_output_path.get_base_dir()
-    if debug_mode:
-        print("Output directory: " + output_dir)
-    
-    if output_dir != "res://" and not dir.dir_exists(output_dir.substr(6)):  # Remove "res://" prefix
-        if debug_mode:
-            print("Creating directory: " + output_dir)
-        var error = dir.make_dir_recursive(output_dir.substr(6))  # Remove "res://" prefix
-        if error != OK:
-            return fail("Failed to create directory: " + output_dir + ", error: " + str(error))
-    
-    # Save the mesh library
+        if not (mesh_instance and mesh_instance.mesh):
+            log_debug("Node " + child.name + " has no valid mesh")
+            continue
+
+        mesh_library.create_item(item_id)
+        mesh_library.set_item_name(item_id, child.name)
+        mesh_library.set_item_mesh(item_id, mesh_instance.mesh)
+        mesh_library.set_item_preview(item_id, mesh_instance.mesh)
+        for collision_child in child.get_children():
+            if collision_child is CollisionShape3D and collision_child.shape:
+                mesh_library.set_item_shapes(item_id, [collision_child.shape])
+                break
+        item_id += 1
+
     if item_id == 0:
         return fail("No valid meshes found in the scene")
-    var save_error = ResourceSaver.save(mesh_library, full_output_path)
-    if save_error != OK:
-        return fail("Failed to save MeshLibrary " + full_output_path + ": " + error_string(save_error))
+    if not save_resource(mesh_library, params.outputPath):
+        return
 
     var items = []
     for id in mesh_library.get_item_list():
         items.append(mesh_library.get_item_name(id))
-    ok({"outputPath": full_output_path, "items": items})
+    ok({"outputPath": to_res_path(params.outputPath), "items": items})
 
 # Find files with a specific extension recursively
 # Directories that cannot be opened are appended to `problems`.
@@ -623,30 +406,10 @@ func find_files(path, extension, problems):
 
 # Get UID for a specific file
 func get_uid(params):
-    if not params.has("filePath"):
-        return fail("File path is required")
-    
-    # Ensure the file path starts with res:// for Godot's resource system
-    var file_path = params.filePath
-    if not file_path.begins_with("res://"):
-        file_path = "res://" + file_path
-    
-    print("Getting UID for file: " + file_path)
-    if debug_mode:
-        print("Full file path (with res://): " + file_path)
-    
-    # Get the absolute path for reference
+    var file_path = to_res_path(params.filePath)
     var absolute_path = ProjectSettings.globalize_path(file_path)
-    if debug_mode:
-        print("Absolute file path: " + absolute_path)
-    
-    # Ensure the file exists
-    var file_check = FileAccess.file_exists(file_path)
-    if debug_mode:
-        print("File exists check: " + str(file_check))
-    
-    if not file_check:
-        return fail("File does not exist at: " + file_path)
+    if not FileAccess.file_exists(file_path):
+        return fail("File does not exist: " + file_path)
     
     # Imported resources (e.g. textures) keep their UID in the .import file rather than a .uid
     # sidecar, so ask the resource loader instead of reading files directly.
@@ -669,9 +432,7 @@ func resave_resources(params):
     # Get project path if provided
     var project_path = "res://"
     if params.has("projectPath"):
-        project_path = params.projectPath
-        if not project_path.begins_with("res://"):
-            project_path = "res://" + project_path
+        project_path = to_res_path(params.projectPath)
         if not project_path.ends_with("/"):
             project_path += "/"
     
@@ -752,71 +513,12 @@ func resave_resources(params):
         return fail(str(problems.size()) + " problem(s) while resaving resources: " + "; ".join(problems))
     ok({"scenesResaved": success_count, "scriptsChecked": scripts.size()})
 
-# Save changes to a scene file
+# Save a scene, optionally to a new path (creating its directory)
 func save_scene(params):
-    print("Saving scene: " + params.scenePath)
-    
-    # Ensure the scene path starts with res:// for Godot's resource system
-    var full_scene_path = params.scenePath
-    if not full_scene_path.begins_with("res://"):
-        full_scene_path = "res://" + full_scene_path
-    
-    if debug_mode:
-        print("Full scene path (with res://): " + full_scene_path)
-    
-    # Check if the scene file exists
-    var file_check = FileAccess.file_exists(full_scene_path)
-    if debug_mode:
-        print("Scene file exists check: " + str(file_check))
-    
-    if not file_check:
-        return fail("Scene file does not exist at: " + full_scene_path)
-    
-    # Load the scene
-    var scene = load(full_scene_path)
-    if not scene:
-        return fail("Failed to load scene: " + full_scene_path)
-    
-    if debug_mode:
-        print("Scene loaded successfully")
-    
-    # Instance the scene
-    var scene_root = scene.instantiate()
-    if debug_mode:
-        print("Scene instantiated")
-    
-    # Determine save path
-    var save_path = params.newPath if params.has("newPath") else full_scene_path
-    if params.has("newPath") and not save_path.begins_with("res://"):
-        save_path = "res://" + save_path
-    
-    if debug_mode:
-        print("Save path: " + save_path)
-    
-    # Create directory if it doesn't exist
-    if params.has("newPath"):
-        var dir = DirAccess.open("res://")
-        if dir == null:
-            return fail("Failed to open res:// directory, error: " + str(DirAccess.get_open_error()))
-            
-        var scene_dir = save_path.get_base_dir()
-        if debug_mode:
-            print("Scene directory: " + scene_dir)
-        
-        if scene_dir != "res://" and not dir.dir_exists(scene_dir.substr(6)):  # Remove "res://" prefix
-            if debug_mode:
-                print("Creating directory: " + scene_dir)
-            var error = dir.make_dir_recursive(scene_dir.substr(6))  # Remove "res://" prefix
-            if error != OK:
-                return fail("Failed to create directory: " + scene_dir + ", error: " + str(error))
-    
-    # Create a packed scene
-    var packed_scene = PackedScene.new()
-    var result = packed_scene.pack(scene_root)
-    if result != OK:
-        return fail("Failed to pack scene: " + error_string(result))
-    var save_error = ResourceSaver.save(packed_scene, save_path)
-    if save_error != OK:
-        return fail("Failed to save scene " + save_path + ": " + error_string(save_error))
-
-    ok({"scenePath": save_path})
+    var scene_root = load_scene_root(params.scenePath)
+    if not scene_root:
+        return
+    var save_path = params.get("newPath", params.scenePath)
+    if not save_scene_root(scene_root, save_path):
+        return
+    ok({"scenePath": to_res_path(save_path)})
