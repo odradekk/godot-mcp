@@ -168,6 +168,34 @@ test('evaluate returns the value in the paused frame', async (t) => {
   assert.deepEqual(messages('evaluate'), [['direction * speed', 0]]);
 });
 
+test('a pending request fails as soon as the game disconnects', async (t) => {
+  const { debug, call, hitBreakpoint } = await setup(t);
+  await hitBreakpoint();
+  debug.answer('evaluate');
+
+  const evaluating = call('evaluate', { expression: 'speed' });
+  await debug.waitFor('evaluate');
+  debug.close();
+  const reply = await evaluating;
+
+  assert.equal(reply.isError, true);
+  assert.match(reply.content.at(-2).text, /disconnected/);
+});
+
+test('a reply that arrives after its request timed out does not answer the next request', async (t) => {
+  const evaluationReturn = (expression, value) => debuggerFrame('evaluation_return', THREAD_ID, [expression, 0, 2, value, '']);
+  const { debug, call, json, hitBreakpoint } = await setup(t);
+  await hitBreakpoint();
+  debug.answer('evaluate', ([expression]) => (expression === 'late' ? [] : [evaluationReturn(expression, 2)]));
+
+  const timedOut = await call('evaluate', { expression: 'late' });
+  const next = json('evaluate', { expression: 'speed' });
+  debug.send(evaluationReturn('late', 1));
+
+  assert.equal(timedOut.isError, true);
+  assert.deepEqual(await next, { expression: 'speed', frame: 0, value: 2 });
+});
+
 test('version limits: evaluate needs Godot 4.4, stepping out 4.6', async (t) => {
   const old = await setup(t, { version: '4.3.stable.official' });
   await old.hitBreakpoint();

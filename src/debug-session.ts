@@ -106,8 +106,8 @@ export class DebugSession {
 
   // Godot's replies carry no request id, so requests go out one at a time: `queue` settles when the
   // last queued request has, and `pending` receives every message while a request is in flight
-  private queue: Promise<unknown> = Promise.resolve();
-  private pending: ((name: string, data: Variant[]) => void) | null = null;
+  private queue: Promise<void> = Promise.resolve();
+  private pending: { receive(name: string, data: Variant[]): void; fail(error: Error): void } | null = null;
   // From the last scene tree the game sent
   private nodesByPath = new Map<string, RemoteNode>();
   private pathsById = new Map<string, string>();
@@ -143,7 +143,7 @@ export class DebugSession {
   private disconnected = false;
 
   get isConnected(): boolean {
-    return this.connected && !!this.socket && !this.socket.destroyed;
+    return this.connected && !this.closed && !!this.socket && !this.socket.destroyed;
   }
 
   /**
@@ -169,12 +169,13 @@ export class DebugSession {
 
   /**
    * Stop accepting connections and end the connection gracefully, so messages the game sent
-   * before exiting are still read.
+   * before exiting are still read. A request in flight fails.
    */
   close() {
     this.closed = true;
     this.server?.close();
     this.socket?.end();
+    this.pending?.fail(new Error('The debug session was closed'));
   }
 
   private accept(socket: net.Socket) {
@@ -198,6 +199,7 @@ export class DebugSession {
     // A closed connection resumes a paused game (Godot leaves its break loop)
     socket.on('close', () => {
       this.disconnected = true;
+      this.pending?.fail(new Error('The game disconnected from the debugger'));
       this.pausedThread = null;
       this.pauseState = null;
       this.notifyPauseWaiters();
@@ -231,7 +233,7 @@ export class DebugSession {
     }
 
     const args = Array.isArray(data) ? data : [];
-    this.pending?.(name, args);
+    this.pending?.receive(name, args);
     if (name === 'error') {
       this.recordError(args);
     } else if (name === 'debug_enter') {
@@ -484,7 +486,8 @@ export class DebugSession {
 
   /**
    * Send a message once the requests before it have settled, and resolve with the first result
-   * other than undefined that `collect` returns for the messages received meanwhile.
+   * other than undefined that `collect` returns for the messages received meanwhile. Rejects after
+   * REQUEST_TIMEOUT_MS, or when the connection ends.
    */
   private request<T>(
     name: string,
@@ -492,29 +495,52 @@ export class DebugSession {
     collect: (name: string, data: Variant[]) => T | undefined,
     threadId?: number | bigint
   ): Promise<T> {
-    const result = this.queue.then(() => this.exchange(name, data, collect, threadId));
-    this.queue = result.catch(() => undefined);
-    return result;
+    return new Promise((resolve, reject) => {
+      this.queue = this.queue.then(() => this.exchange(name, data, collect, threadId, resolve, reject));
+    });
   }
 
+  /**
+   * Run one request. Settles once the request is answered, abandoned or failed, so the next one
+   * can go out; never rejects.
+   */
   private exchange<T>(
     name: string,
     data: unknown[],
     collect: (name: string, data: Variant[]) => T | undefined,
-    threadId?: number | bigint
-  ): Promise<T> {
-    if (!this.isConnected) return Promise.reject(new Error('The game is not connected to the debugger'));
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+    threadId: number | bigint | undefined,
+    resolve: (result: T) => void,
+    reject: (error: Error) => void
+  ): Promise<void> {
+    if (!this.isConnected) {
+      reject(new Error('The game is not connected to the debugger'));
+      return Promise.resolve();
+    }
+    return new Promise((settle) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`The game did not answer ${name} within ${REQUEST_TIMEOUT_MS / 1000} s`)),
+        REQUEST_TIMEOUT_MS
+      );
+      // Godot answers in order, so a late reply still belongs to this request: keep receiving, and
+      // keep the next request back, for one more timeout. A later reply can reach the next request.
+      const abandon = setTimeout(() => end(), 2 * REQUEST_TIMEOUT_MS);
+      const end = () => {
+        clearTimeout(timeout);
+        clearTimeout(abandon);
         this.pending = null;
-        reject(new Error(`The game did not answer ${name} within ${REQUEST_TIMEOUT_MS / 1000} s`));
-      }, REQUEST_TIMEOUT_MS);
-      this.pending = (replyName, replyData) => {
-        const result = collect(replyName, replyData);
-        if (result === undefined) return;
-        clearTimeout(timer);
-        this.pending = null;
-        resolve(result);
+        settle();
+      };
+      this.pending = {
+        receive: (replyName, replyData) => {
+          const result = collect(replyName, replyData);
+          if (result === undefined) return;
+          end();
+          resolve(result);
+        },
+        fail: (error) => {
+          end();
+          reject(error);
+        },
       };
       this.send(name, data, threadId);
     });
