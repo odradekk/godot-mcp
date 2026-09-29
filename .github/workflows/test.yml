@@ -21,4 +21,5 @@ jobs:
           unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
           chmod +x "$RUNNER_TEMP/godot/Godot_v4.7.2-stable_linux.x86_64"
           echo "GODOT_PATH=$RUNNER_TEMP/godot/Godot_v4.7.2-stable_linux.x86_64" >> "$GITHUB_ENV"
-      - run: npm test
+      # run_project starts windowed games, so the tests need a display
+      - run: xvfb-run -a npm test
