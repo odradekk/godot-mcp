@@ -4,36 +4,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { connect, debuggerFixtures, debuggerFrame, fakeLauncher, makeProject, text } from './harness.mjs';
+import { THREAD_ID, attach, debuggerFixtures, debuggerFrame, startGame, text } from './harness.mjs';
 
-const GODOT = '/opt/godot';
 const { frames, lines } = debuggerFixtures();
-const THREAD_ID = 1;
 const PAUSED_NOTE = `Game paused at res://player.gd:${lines.breakpoint} (_process); use resume_game to continue`;
 const frameVars = ['stack_frame_vars', 'stack_frame_var_delta', 'stack_frame_var_step', 'stack_frame_var_self', 'stack_frame_var_speed', 'stack_frame_var_velocity', 'stack_frame_var_direction'].map((key) => frames[key]);
 
-const godotReporting = (version) => (file, args) => {
-  if (args[0] === '--version') return { stdout: `${version}\n` };
-  throw new Error(`Unexpected Godot call: ${args.join(' ')}`);
-};
-
-async function setup(t, { version = '4.7.2.stable.official', breakOnError = false, before } = {}) {
-  const launcher = fakeLauncher(godotReporting(version));
-  const { client, close } = await connect({ godotPath: GODOT, launcher, stopTimeoutMs: 200 });
-  t.after(close);
-  const call = (name, args = {}) => client.callTool({ name, arguments: args });
-  // The last content item is the tool's own reply; a pause note may come first
-  const json = async (name, args) => JSON.parse((await call(name, args)).content.at(-1).text);
-  await before?.(call);
-
-  await call('run_project', { projectPath: await makeProject(t), breakOnError });
-  const game = launcher.children.at(-1);
-  const debug = await game.connectDebugger();
+async function setup(t, { version, breakOnError = false, before } = {}) {
+  const { game, call, json } = await startGame(t, { version, config: { stopTimeoutMs: 200 }, runArgs: { breakOnError }, before });
+  const debug = await attach(game);
   debug.answer('get_stack_dump', frames.stack_dump);
   debug.answer('get_stack_frame_vars', ...frameVars);
   debug.answer('evaluate', frames.evaluation_return);
-  debug.send(frames.set_pid);
-  await debug.waitFor('set_skip_breakpoints');
 
   const hitBreakpoint = async () => {
     const waiting = json('get_debug_state', { waitMs: 2000 });
@@ -54,7 +36,7 @@ test('breakpoints are sent on connect and on change; breakpoint skipping follows
   assert.deepEqual(messages('breakpoint'), [['res://player.gd', lines.breakpoint, true]]);
 
   const cleared = JSON.parse(text(await call('set_breakpoint', { file: 'res://player.gd', line: lines.breakpoint, enabled: false })));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await debug.waitFor('set_skip_breakpoints', { count: 2 });
 
   assert.deepEqual(cleared, { breakpoints: [] });
   assert.deepEqual(messages('breakpoint').at(-1), ['res://player.gd', lines.breakpoint, false]);
@@ -110,11 +92,13 @@ test('resume_game returns exited when the game exits while it waits', async (t) 
   debug.answer('continue', frames.debug_exit);
 
   const started = Date.now();
-  setTimeout(() => game.exit(0), 50);
-  const state = await json('resume_game', { waitMs: 5000 });
+  const resuming = json('resume_game', { waitMs: 60000 });
+  await debug.waitFor('continue');
+  game.exit(0);
+  const state = await resuming;
 
   assert.deepEqual(state, { status: 'exited', exitCode: 0 });
-  assert.ok(Date.now() - started < 2000);
+  assert.ok(Date.now() - started < 30000, 'the wait should end when the game exits');
 });
 
 test('get_debug_state reads the variables of another stack frame', async (t) => {

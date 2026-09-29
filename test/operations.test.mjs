@@ -2,9 +2,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
+import { GODOT, connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
 
-const GODOT = '/opt/godot';
 const BANNER = 'Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org\n\n';
 const LEAK_WARNING = 'WARNING: 1 RID of type "CanvasItem" was leaked.\n   at: _free_rids (servers/rendering/renderer_canvas_cull.cpp:2733)\n';
 

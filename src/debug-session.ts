@@ -8,8 +8,9 @@
 
 import net from 'net';
 
+import { FrameReader, encodeFrame } from './debugger-frames.js';
 import { variantToJson } from './runtime-values.js';
-import { Variant, decodeVariant, encodeVariant } from './variant.js';
+import { Variant, decodeVariant } from './variant.js';
 
 // Distinct errors kept per run; later reports are counted but not stored
 const MAX_REPORTED_ERRORS = 200;
@@ -190,14 +191,9 @@ export class DebugSession {
     this.socket = socket;
     this.server?.close();
 
-    let pending = Buffer.alloc(0);
+    const reader = new FrameReader();
     socket.on('data', (chunk: Buffer) => {
-      pending = Buffer.concat([pending, chunk]);
-      while (pending.length >= 4 && pending.length >= 4 + pending.readUInt32LE(0)) {
-        const length = pending.readUInt32LE(0);
-        this.receive(pending.subarray(4, 4 + length));
-        pending = pending.subarray(4 + length);
-      }
+      for (const frame of reader.push(chunk)) this.receive(frame);
     });
     socket.on('error', (error) => this.options.log?.(`Debugger connection error: ${error.message}`));
     // A closed connection resumes a paused game (Godot leaves its break loop)
@@ -210,7 +206,7 @@ export class DebugSession {
   private receive(frame: Buffer) {
     let message: Variant;
     try {
-      [message] = decodeVariant(frame);
+      [message] = decodeVariant(frame, 4);
     } catch (error) {
       this.options.log?.(`Skipping an undecodable debugger message: ${error instanceof Error ? error.message : error}`);
       return;
@@ -563,10 +559,7 @@ export class DebugSession {
 
   private send(name: string, data: unknown[] = [], threadId: number | bigint = this.threadId) {
     if (!this.socket || this.socket.destroyed) return;
-    const body = encodeVariant([name, threadId, data]);
-    const length = Buffer.alloc(4);
-    length.writeUInt32LE(body.length);
-    this.socket.write(Buffer.concat([length, body]));
+    this.socket.write(encodeFrame(name, threadId, data));
   }
 
   // An error message is [hour, minute, second, msec, source_file, source_function, source_line,

@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { decodeVariant, encodeVariant } from '../build/variant.js';
+import { FrameReader, encodeFrame } from '../build/debugger-frames.js';
+import { decodeVariant } from '../build/variant.js';
 
 const godot = process.env.GODOT_PATH;
 if (!godot) throw new Error('Set GODOT_PATH to a Godot 4.5+ executable');
@@ -44,18 +45,10 @@ function record(projectDir, onMessage) {
   return new Promise((resolve) => {
     let threadId = 0;
     const server = net.createServer((socket) => {
-      let pending = Buffer.alloc(0);
-      const send = (name, data = []) => {
-        const body = encodeVariant([name, threadId, data]);
-        const length = Buffer.alloc(4);
-        length.writeUInt32LE(body.length);
-        socket.write(Buffer.concat([length, body]));
-      };
+      const reader = new FrameReader();
+      const send = (name, data = []) => socket.write(encodeFrame(name, threadId, data));
       socket.on('data', (chunk) => {
-        pending = Buffer.concat([pending, chunk]);
-        while (pending.length >= 4 && pending.length >= 4 + pending.readUInt32LE(0)) {
-          const frame = pending.subarray(0, 4 + pending.readUInt32LE(0));
-          pending = pending.subarray(frame.length);
+        for (const frame of reader.push(chunk)) {
           const [[name, tid, data]] = decodeVariant(frame, 4);
           if (tid) threadId = tid;
           onMessage(name, data, frame, send, game);

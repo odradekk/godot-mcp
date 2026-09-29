@@ -5,10 +5,11 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { connect, makeProject, text } from './harness.mjs';
+import { connect, makeProject, pollUntil, text } from './harness.mjs';
 
 const godotPath = process.env.GODOT_PATH;
-const skip = !godotPath && 'GODOT_PATH is not set';
+// CI installs Godot, so a missing one must fail the run there instead of skipping these tests
+const skip = !godotPath && !process.env.CI && 'GODOT_PATH is not set';
 
 async function realGodot(t) {
   const { client, close } = await connect({ godotPath, strictPathValidation: true });
@@ -23,11 +24,7 @@ async function call(client, name, args) {
 // Poll get_debug_output until the game exits, for up to 20 s
 async function waitForRunEnd(client) {
   let run;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    run = JSON.parse(text(await call(client, 'get_debug_output', {})));
-    if (!run.running) break;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+  await pollUntil(async () => !(run = JSON.parse(text(await call(client, 'get_debug_output', {})))).running, { timeoutMs: 20000, intervalMs: 200 });
   return run;
 }
 
@@ -278,11 +275,11 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
   await call(client, 'run_project', { projectPath });
   // The game connects to the debugger before its main scene is loaded, so wait for the scene too
   let tree;
-  for (let attempt = 0; attempt < 50 && !tree?.children?.some((node) => node.name === 'Main'); attempt++) {
+  await pollUntil(async () => {
     const reply = await call(client, 'get_scene_tree', {});
     if (!reply.isError) tree = JSON.parse(text(reply)).tree;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+    return tree?.children?.some((node) => node.name === 'Main');
+  }, { timeoutMs: 20000, intervalMs: 200 });
   assert.ok(tree, 'the game never connected to the debugger');
   const paths = [];
   const collect = (node) => { paths.push(node.path); node.children?.forEach(collect); };
@@ -295,9 +292,12 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
 
   const set = JSON.parse(text(await call(client, 'set_node_property', { nodePath: '/root/Main/Player', property: 'velocity', value: { x: 120, y: 0 } })));
   assert.deepEqual(set.value, [120, 0]);
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const after = JSON.parse(text(await call(client, 'get_node_properties', { nodePath: '/root/Main/Player', names: ['position'] })));
-  assert.ok(after.properties.position[0] > 10, `position after 0.5 s: ${after.properties.position}`);
+  let after;
+  await pollUntil(async () => {
+    after = JSON.parse(text(await call(client, 'get_node_properties', { nodePath: '/root/Main/Player', names: ['position'] })));
+    return after.properties.position[0] > 10;
+  }, { timeoutMs: 10000, intervalMs: 200 });
+  assert.ok(after.properties.position[0] > 10, `position of the moving node: ${after.properties.position}`);
 
   assert.equal(await readFile(join(projectPath, 'main.tscn'), 'utf8'), scene, 'the scene file must not change');
   await call(client, 'stop_project', {});
