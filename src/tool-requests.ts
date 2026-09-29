@@ -6,6 +6,8 @@
 import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 
+import { GodotLauncher } from './godot-launcher.js';
+
 export type ToolArgs = Record<string, any>;
 
 export interface ToolReply {
@@ -48,14 +50,21 @@ export interface ToolDefinition {
   failure: string;
   /** Minimum Godot version, checked before the tool runs. */
   minGodot?: { version: [number, number]; feature: string; solutions: string[] };
-  /** Runs a godot_operations.gd operation with every argument except projectPath. */
-  operation?: {
-    name: string;
-    solutions: string[];
-    render(result: any, args: ToolArgs): string;
-  };
-  /** Runs anything else. Exactly one of operation and handle is set. */
-  handle?(args: ToolArgs): Promise<ToolReply>;
+  /** Runs the tool with checked arguments. Throws ToolError to reply with a failure. */
+  handle(args: ToolArgs): Promise<ToolReply>;
+}
+
+/**
+ * What tools use of the server. Tools are built once Godot has been found.
+ */
+export interface ToolContext {
+  godotPath: string;
+  launcher: GodotLauncher;
+  /** Time limit for one Godot operation or import, in milliseconds */
+  operationTimeoutMs: number;
+  /** Attach Godot's output to failures and log debug messages */
+  debugMode: boolean;
+  log(message: string): void;
 }
 
 /**

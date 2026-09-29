@@ -6,8 +6,7 @@
  * capture debug output, and control project execution.
  */
 
-import { fileURLToPath } from 'url';
-import { join, dirname, basename, normalize } from 'path';
+import { join, basename, normalize } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -23,10 +22,12 @@ import { GodotLauncher, nodeLauncher } from './godot-launcher.js';
 import { Breakpoint, DebugSession, InspectedObject, PauseState, RemoteNode, RemoteProperty, ResumeAction } from './debug-session.js';
 import { VariantType } from './variant.js';
 import { DebuggerSetup, ProjectRunner } from './godot-run.js';
+import { importProject, operationTool, scriptOperation } from './operations.js';
 import { SETTABLE_TYPES, inferVariantType, jsonToVariant, variantToJson } from './runtime-values.js';
 import {
   Param,
   ToolArgs,
+  ToolContext,
   ToolDefinition,
   ToolError,
   ToolReply,
@@ -35,6 +36,7 @@ import {
   inputSchema,
   jsonReply,
   prepareRequest,
+  textReply,
 } from './tool-requests.js';
 
 // How godot_operations.gd resolves node paths; stated in every node path parameter
@@ -50,54 +52,6 @@ const RUNTIME_PATH_RULE =
   'The running tree starts at the window "root", with autoloads next to the main scene; this differs from the scene-file tools.';
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60 * 1000;
-const OPERATION_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
-// Lines of Godot output attached to failure replies
-const LOG_TAIL_LINES = 40;
-// Prefix of the stdout line on which godot_operations.gd reports its outcome
-const RESULT_MARKER = '@@GODOT_MCP_RESULT@@ ';
-
-/**
- * Outcome of one run of godot_operations.gd. `log` is the rest of Godot's output.
- */
-type OperationOutcome =
-  | { ok: true; result: any; log: string }
-  | { ok: false; error: string; log: string };
-
-function lastLines(text: string, count: number): string {
-  return text.trim().split(/\r?\n/).slice(-count).join('\n');
-}
-
-function withStderrTail(message: string, stderr: string): string {
-  const tail = lastLines(stderr, LOG_TAIL_LINES);
-  return tail ? `${message}. Godot stderr:\n${tail}` : message;
-}
-
-/**
- * Interpret a finished run of godot_operations.gd. The last result line on stdout decides the
- * outcome, whatever the exit code; a run without one (Godot crashed or failed before the script
- * could report) is a failure.
- */
-function readOperationOutcome({ stdout, stderr, exitCode }: { stdout: string; stderr: string; exitCode: number }): OperationOutcome {
-  const lines = stdout.split(/\r?\n/);
-  const reports = lines.filter((line) => line.startsWith(RESULT_MARKER));
-  const log = [...lines.filter((line) => !line.startsWith(RESULT_MARKER)), stderr].join('\n').trim();
-
-  const report = reports.pop();
-  if (report === undefined) {
-    return { ok: false, error: withStderrTail(`Godot exited with code ${exitCode} without reporting a result`, stderr), log };
-  }
-  try {
-    const outcome = JSON.parse(report.slice(RESULT_MARKER.length));
-    return outcome.ok ? { ok: true, result: outcome.result, log } : { ok: false, error: String(outcome.error), log };
-  } catch {
-    return { ok: false, error: `Godot reported an unreadable result: ${report}`, log };
-  }
-}
-
-// Derive __filename and __dirname in ESM
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 /**
  * Interface for server configuration
  */
@@ -133,7 +87,6 @@ export class GodotServer {
   // Kept by the server, so they apply to every run
   private breakpoints = new Map<string, Breakpoint>();
   private godotPath: string | null = null;
-  private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private strictPathValidation: boolean;
   private debugMode: boolean;
@@ -162,10 +115,6 @@ export class GodotServer {
       this.logDebug(`Custom Godot path provided: ${this.godotPath}`);
     }
 
-    // Set the path to the operations script
-    this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
-    this.logDebug(`Operations script path: ${this.operationsScriptPath}`);
-
     // Initialize the MCP server
     this.server = new Server(
       {
@@ -178,9 +127,6 @@ export class GodotServer {
         },
       }
     );
-
-    // Set up tool handlers
-    this.setupToolHandlers();
 
     // Error handling
     this.server.onerror = (error) => console.error('[MCP Error]', error);
@@ -342,78 +288,6 @@ export class GodotServer {
   }
 
   /**
-   * Execute a Godot operation using the operations script
-   * @param operation The operation to execute
-   * @param params The parameters for the operation
-   * @param projectPath The path to the Godot project
-   * @returns The result the operation reported, or why it failed
-   */
-  private async executeOperation(
-    operation: string,
-    params: ToolArgs,
-    projectPath: string
-  ): Promise<OperationOutcome> {
-    this.logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
-    this.logDebug(`Operation params: ${JSON.stringify(params)}`);
-
-
-
-
-    const paramsJson = JSON.stringify(params);
-
-    // Build argument array for execFile to prevent command injection
-    // Using execFile with argument arrays avoids shell interpretation entirely
-    const args = [
-      '--headless',
-      '--path',
-      projectPath,  // Safe: passed as argument, not interpolated into shell command
-      '--script',
-      this.operationsScriptPath,
-      operation,
-      paramsJson,  // Safe: passed as argument, not interpreted by shell
-    ];
-
-
-    if (this.debugMode) {
-      args.push('--debug-godot');
-    }
-
-    this.logDebug(`Executing: ${this.godotPath} ${args.join(' ')}`);
-
-    try {
-      return readOperationOutcome(await this.launcher.run(this.godotPath!, args, {
-        timeoutMs: this.operationTimeoutMs,
-        maxBufferBytes: OPERATION_OUTPUT_LIMIT_BYTES,
-      }));
-    } catch (error: unknown) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error), log: '' };
-    }
-  }
-
-  /**
-   * Build the tool reply for an operation outcome. Success text comes from `render(result)`;
-   * failures lead with the operation's own message, and include Godot's output in debug mode.
-   */
-  private operationReply(
-    outcome: OperationOutcome,
-    failurePrefix: string,
-    possibleSolutions: string[],
-    render: (result: any) => string
-  ): ToolReply {
-    if (outcome.ok) {
-      return { content: [{ type: 'text', text: render(outcome.result) }] };
-    }
-    const response = errorReply(`${failurePrefix}: ${outcome.error}`, possibleSolutions);
-    if (this.debugMode && outcome.log) {
-      response.content.push({
-        type: 'text',
-        text: `Godot output (last ${LOG_TAIL_LINES} lines):\n${lastLines(outcome.log, LOG_TAIL_LINES)}`,
-      });
-    }
-    return response;
-  }
-
-  /**
    * Find Godot projects in a directory
    * @param directory Directory to search
    * @param recursive Whether to search recursively
@@ -505,7 +379,7 @@ export class GodotServer {
         if ('error' in prepared) {
           return prepared.error;
         }
-        return this.withPauseNote(await this.runTool(tool, prepared.args));
+        return this.withPauseNote(await tool.handle(prepared.args));
       } catch (error: unknown) {
         if (error instanceof ToolError) {
           return this.withPauseNote(errorReply(error.message, error.solutions, error.details));
@@ -520,21 +394,21 @@ export class GodotServer {
     });
   }
 
-  private async runTool(tool: ToolDefinition, args: ToolArgs): Promise<ToolReply> {
-    if (tool.operation) {
-      const { projectPath, ...params } = args;
-      const outcome = await this.executeOperation(tool.operation.name, params, projectPath);
-      return this.operationReply(outcome, tool.failure, tool.operation.solutions, (result) =>
-        tool.operation!.render(result, args)
-      );
-    }
-    return tool.handle!(args);
+  private toolContext(): ToolContext {
+    return {
+      godotPath: this.godotPath!,
+      launcher: this.launcher,
+      operationTimeoutMs: this.operationTimeoutMs,
+      debugMode: this.debugMode,
+      log: (message) => this.logDebug(message),
+    };
   }
 
   /**
    * The tools this server offers, in the order they are listed
    */
   private defineTools(): ToolDefinition[] {
+    const ctx = this.toolContext();
     const projectPath: Param = { type: 'string', description: 'Path to the Godot project directory', check: 'project' };
     const sceneFile = (description: string): Param => ({
       type: 'string',
@@ -617,7 +491,7 @@ export class GodotServer {
         failure: 'Failed to get project info',
         handle: (args) => this.handleGetProjectInfo(args),
       },
-      {
+      operationTool(ctx, {
         name: 'create_scene',
         description: 'Create a new Godot scene file',
         params: {
@@ -627,17 +501,14 @@ export class GodotServer {
         },
         required: ['projectPath', 'scenePath'],
         failure: 'Failed to create scene',
-        operation: {
-          name: 'create_scene',
-          solutions: [
-            'Check if the root node type is valid',
-            'Ensure you have write permissions to the scene path',
-            'Verify the scene path is valid',
-          ],
-          render: (result) => `Scene created successfully at: ${result.scenePath}`,
-        },
-      },
-      {
+        solutions: [
+          'Check if the root node type is valid',
+          'Ensure you have write permissions to the scene path',
+          'Verify the scene path is valid',
+        ],
+        render: (result) => `Scene created successfully at: ${result.scenePath}`,
+      }),
+      operationTool(ctx, {
         name: 'add_node',
         description: 'Add a node to an existing scene',
         params: {
@@ -653,18 +524,15 @@ export class GodotServer {
         },
         required: ['projectPath', 'scenePath', 'nodeType', 'nodeName'],
         failure: 'Failed to add node',
-        operation: {
-          name: 'add_node',
-          solutions: [
-            'Check if the node type is valid',
-            'Ensure the parent node path exists',
-            'Verify the scene file is valid',
-          ],
-          render: (result, args) =>
-            `Node '${args.nodeName}' of type '${result.nodeType}' added successfully at ${result.nodePath} in '${result.scenePath}'.`,
-        },
-      },
-      {
+        solutions: [
+          'Check if the node type is valid',
+          'Ensure the parent node path exists',
+          'Verify the scene file is valid',
+        ],
+        render: (result, args) =>
+          `Node '${args.nodeName}' of type '${result.nodeType}' added successfully at ${result.nodePath} in '${result.scenePath}'.`,
+      }),
+      operationTool(ctx, {
         name: 'load_sprite',
         description: 'Load a sprite into a Sprite2D node',
         params: {
@@ -684,18 +552,15 @@ export class GodotServer {
         },
         required: ['projectPath', 'scenePath', 'nodePath', 'texturePath'],
         failure: 'Failed to load sprite',
-        operation: {
-          name: 'load_sprite',
-          solutions: [
-            'Check if the node path is correct',
-            'Ensure the node is a Sprite2D, Sprite3D, or TextureRect',
-            'Verify the texture file is a valid image format',
-          ],
-          render: (result) =>
-            `Sprite loaded successfully with texture: ${result.texturePath} on ${result.nodePath} in '${result.scenePath}'.`,
-        },
-      },
-      {
+        solutions: [
+          'Check if the node path is correct',
+          'Ensure the node is a Sprite2D, Sprite3D, or TextureRect',
+          'Verify the texture file is a valid image format',
+        ],
+        render: (result) =>
+          `Sprite loaded successfully with texture: ${result.texturePath} on ${result.nodePath} in '${result.scenePath}'.`,
+      }),
+      operationTool(ctx, {
         name: 'export_mesh_library',
         description: 'Export a scene as a MeshLibrary resource',
         params: {
@@ -710,18 +575,15 @@ export class GodotServer {
         },
         required: ['projectPath', 'scenePath', 'outputPath'],
         failure: 'Failed to export mesh library',
-        operation: {
-          name: 'export_mesh_library',
-          solutions: [
-            'Check if the scene contains valid 3D meshes',
-            'Ensure the output path is valid',
-            'Verify the scene file is valid',
-          ],
-          render: (result) =>
-            `MeshLibrary exported successfully to: ${result.outputPath} (${result.items.length} items: ${result.items.join(', ')})`,
-        },
-      },
-      {
+        solutions: [
+          'Check if the scene contains valid 3D meshes',
+          'Ensure the output path is valid',
+          'Verify the scene file is valid',
+        ],
+        render: (result) =>
+          `MeshLibrary exported successfully to: ${result.outputPath} (${result.items.length} items: ${result.items.join(', ')})`,
+      }),
+      operationTool(ctx, {
         name: 'save_scene',
         description: 'Save changes to a scene file',
         params: {
@@ -731,17 +593,14 @@ export class GodotServer {
         },
         required: ['projectPath', 'scenePath'],
         failure: 'Failed to save scene',
-        operation: {
-          name: 'save_scene',
-          solutions: [
-            'Check if the scene file is valid',
-            'Ensure you have write permissions to the output path',
-            'Verify the scene can be properly packed',
-          ],
-          render: (result) => `Scene saved successfully to: ${result.scenePath}`,
-        },
-      },
-      {
+        solutions: [
+          'Check if the scene file is valid',
+          'Ensure you have write permissions to the output path',
+          'Verify the scene can be properly packed',
+        ],
+        render: (result) => `Scene saved successfully to: ${result.scenePath}`,
+      }),
+      operationTool(ctx, {
         name: 'get_uid',
         description: 'Get the UID for a specific file in a Godot project (for Godot 4.4+)',
         params: {
@@ -751,12 +610,9 @@ export class GodotServer {
         required: ['projectPath', 'filePath'],
         failure: 'Failed to get UID',
         minGodot: uidSupport,
-        operation: {
-          name: 'get_uid',
-          solutions: ['Check if the file is a valid Godot resource', 'Ensure the file path is correct'],
-          render: (result) => JSON.stringify(result, null, 2),
-        },
-      },
+        solutions: ['Check if the file is a valid Godot resource', 'Ensure the file path is correct'],
+        render: (result) => JSON.stringify(result, null, 2),
+      }),
       {
         name: 'update_project_uids',
         description: 'Generate missing UIDs and resave resources in a Godot project (for Godot 4.4+)',
@@ -1282,37 +1138,17 @@ export class GodotServer {
   }
 
   private async handleUpdateProjectUids(args: ToolArgs): Promise<ToolReply> {
+    const ctx = this.toolContext();
     const failure = 'Failed to update project UIDs';
     const solutions = ['Check if the project is valid', 'Ensure you have write permissions to the project directory'];
 
     // The editor's filesystem scan writes missing .uid files; ResourceSaver does not outside the editor
-    const importResult = await this.launcher.run(
-      this.godotPath!,
-      ['--headless', '--path', args.projectPath, '--import'],
-      { timeoutMs: this.operationTimeoutMs, maxBufferBytes: OPERATION_OUTPUT_LIMIT_BYTES }
-    );
-    if (importResult.exitCode !== 0) {
-      return this.operationReply(
-        {
-          ok: false,
-          error: withStderrTail(`Godot import exited with code ${importResult.exitCode}`, importResult.stderr),
-          log: `${importResult.stdout}\n${importResult.stderr}`.trim(),
-        },
-        failure,
-        solutions,
-        () => ''
-      );
-    }
-
+    await importProject(ctx, args.projectPath, failure, solutions);
     // The script scans res:// by default; args.projectPath is a disk path for --path and must not
     // be passed as the scan root.
-    const outcome = await this.executeOperation('resave_resources', {}, args.projectPath);
-    return this.operationReply(
-      outcome,
-      failure,
-      solutions,
-      (result) =>
-        `Project UIDs updated successfully. Resaved ${result.scenesResaved} scenes; ${result.scriptsChecked} scripts and shaders have UIDs.`
+    const result = await scriptOperation(ctx, 'resave_resources', {}, args.projectPath, failure, solutions);
+    return textReply(
+      `Project UIDs updated successfully. Resaved ${result.scenesResaved} scenes; ${result.scriptsChecked} scripts and shaders have UIDs.`
     );
   }
 
@@ -1322,6 +1158,7 @@ export class GodotServer {
    */
   async connect(transport: Transport) {
     await this.detectGodotPath();
+    this.setupToolHandlers();
     console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
     await this.server.connect(transport);
   }
