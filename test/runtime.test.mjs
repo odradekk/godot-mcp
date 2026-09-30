@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { GODOT, attach, connect, debuggerFixtures, fakeLauncher, godotReporting, makeProject, startGame, text } from './harness.mjs';
+import { GODOT, THREAD_ID, attach, connect, debuggerFixtures, debuggerFrame, fakeLauncher, godotReporting, makeProject, startGame, text } from './harness.mjs';
 import { variantToJson } from '../build/runtime-values.js';
 import { TypedVariant, decodeVariant } from '../build/variant.js';
 
@@ -56,6 +56,43 @@ test('get_scene_tree lists a subtree and stops at maxNodes', async (t) => {
   assert.deepEqual(subtree.tree.children.map((node) => node.path), ['/root/Main/HUD/Label']);
   assert.equal(limited.omittedNodes, 4); // 7 nodes, 3 listed
   assert.deepEqual(limited.tree.children.map((node) => node.name), ['GameState', 'Main']);
+});
+
+// The game connects to the debugger before it adds its autoloads and main scene to the root
+const emptyRoot = debuggerFrame('scene:scene_tree', THREAD_ID, [0, 'root', 'Window', 1, '', 0]);
+function startsAfter(emptyReplies) {
+  let requests = 0;
+  return () => [requests++ < emptyReplies ? emptyRoot : frames.scene_tree];
+}
+
+test('get_scene_tree waits for a starting game to add its main scene', async (t) => {
+  const { debug, json } = await setup(t);
+  debug.answer('scene:request_scene_tree', startsAfter(2));
+
+  const { tree } = await json('get_scene_tree');
+
+  assert.deepEqual(tree.children.map((node) => node.name), ['GameState', 'Main']);
+});
+
+test('node lookups wait for a starting game to add its main scene', async (t) => {
+  const { debug, json } = await setup(t);
+  debug.answer('scene:request_scene_tree', startsAfter(2));
+
+  const properties = await json('get_node_properties', { nodePath: '/root/Main/Player' });
+
+  assert.equal(properties.node.path, '/root/Main/Player');
+});
+
+test('get_scene_tree says so when the game has not added its main scene in time', async (t) => {
+  const { debug, json } = await setup(t);
+  debug.answer('scene:request_scene_tree', emptyRoot);
+
+  const reply = await json('get_scene_tree');
+
+  assert.deepEqual(reply, {
+    tree: { name: 'root', path: '/root', type: 'Window' },
+    note: 'The game has not added its autoloads and main scene yet; try again in a moment',
+  });
 });
 
 test('get_node_properties separates script variables from engine properties, as plain JSON', async (t) => {

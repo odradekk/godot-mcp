@@ -273,13 +273,14 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
   });
 
   await call(client, 'run_project', { projectPath });
-  // The game connects to the debugger before its main scene is loaded, so wait for the scene too
+  // The game connects to the debugger before it adds its autoloads and main scene, yet the first
+  // tree must already have them; the short interval asks soon after the game connects
   let tree;
   await pollUntil(async () => {
     const reply = await call(client, 'get_scene_tree', {});
     if (!reply.isError) tree = JSON.parse(text(reply)).tree;
-    return tree?.children?.some((node) => node.name === 'Main');
-  }, { timeoutMs: 20000, intervalMs: 200 });
+    return tree;
+  }, { timeoutMs: 20000, intervalMs: 20 });
   assert.ok(tree, 'the game never connected to the debugger');
   const paths = [];
   const collect = (node) => { paths.push(node.path); node.children?.forEach(collect); };

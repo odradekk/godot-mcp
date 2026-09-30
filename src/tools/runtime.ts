@@ -57,9 +57,11 @@ export function runtimeTools(ctx: ToolContext): ToolDefinition[] {
           };
         };
         const tree = toJson(start);
+        const starting = !args.path && start.children.length === 0;
         return jsonReply({
           tree,
           ...(omitted > 0 ? { omittedNodes: omitted, note: `Only ${maxNodes} nodes are listed; pass path for a subtree or raise maxNodes` } : {}),
+          ...(starting ? { note: 'The game has not added its autoloads and main scene yet; try again in a moment' } : {}),
         });
       },
     },
