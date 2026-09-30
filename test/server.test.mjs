@@ -168,12 +168,13 @@ async function listedProjects(t, directory, recursive) {
   return projects.map(({ path }) => path).sort();
 }
 
-test('list_projects without recursive lists the directory and its direct subdirectories that are projects', async (t) => {
+test('list_projects without recursive lists the directory and its direct subdirectories that are projects, skipping hidden ones', async (t) => {
   const root = await makeProject(t, {
     'workspace/project.godot': '',
     'workspace/game/project.godot': '',
     'workspace/tools/nested/project.godot': '',
     'workspace/assets/icon.png': '',
+    'workspace/.hidden/project.godot': '',
   });
   const workspace = join(root, 'workspace');
 

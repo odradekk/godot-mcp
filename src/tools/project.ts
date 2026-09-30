@@ -37,7 +37,7 @@ export function projectTools(ctx: ToolContext): ToolDefinition[] {
     },
     {
       name: 'list_projects',
-      description: 'List Godot projects in a directory',
+      description: 'List Godot projects in a directory, skipping hidden directories',
       params: {
         directory: { type: 'string', description: 'Directory to search for Godot projects', check: 'directory' },
         recursive: { type: 'boolean', description: 'Whether to search recursively (default: false)', default: false },
@@ -70,7 +70,7 @@ export function projectTools(ctx: ToolContext): ToolDefinition[] {
 
 /**
  * Godot projects in `directory`: the directory itself and its subdirectories, or with `recursive`
- * every project below it, skipping hidden directories and not looking inside projects
+ * every project below it. Hidden directories are skipped either way, and projects are not searched.
  */
 function findGodotProjects(ctx: ToolContext, directory: string, recursive: boolean): Array<{ path: string; name: string }> {
   const projects: Array<{ path: string; name: string }> = [];
@@ -79,7 +79,7 @@ function findGodotProjects(ctx: ToolContext, directory: string, recursive: boole
       projects.push({ path: directory, name: basename(directory) });
     }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (!entry.isDirectory() || (recursive && entry.name.startsWith('.'))) continue;
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
       const subdir = join(directory, entry.name);
       if (existsSync(join(subdir, 'project.godot'))) {
         projects.push({ path: subdir, name: entry.name });
