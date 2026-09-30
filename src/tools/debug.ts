@@ -48,7 +48,12 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
       failure: 'Failed to pause the game',
       handle: async () => {
         const session = requireSession(ctx.runner);
-        if (!session.isPaused && !(await session.pauseGame(3000))) throw new ToolError('The game did not pause within 3 s');
+        if (session.isPaused) {
+          const pause = await session.capturedPause(3000);
+          if (pause) return pauseReply(session, pause, 0);
+        } else if (!(await session.pauseGame(3000))) {
+          throw new ToolError('The game did not pause within 3 s');
+        }
         return debugStateReply(ctx, session);
       },
     },
@@ -105,14 +110,15 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
           throw sessionUnavailable(ctx.runner.noSessionReason());
         }
         const frame: number = args.frame;
-        if (session.isPaused) await session.capturedPause(3000);
-        else if (args.waitMs) await session.nextPause(args.waitMs);
-        if (frame !== 0) {
-          const pause = session.pause;
-          if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');
-          checkFrame(pause, frame);
-          return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
+        if (session.isPaused) {
+          const pause = await session.capturedPause(3000);
+          if (pause) return pauseReply(session, pause, frame);
+        } else if (args.waitMs) {
+          const pause = await session.nextPause(args.waitMs);
+          // A new pause already has the variables of frame 0
+          if (pause && frame !== 0) return pauseReply(session, pause, frame);
         }
+        if (frame !== 0) throw new ToolError('The game is not paused, so it has no stack frames to read');
         return debugStateReply(ctx, session);
       },
     },
@@ -149,6 +155,17 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
 function checkFrame(pause: PauseState, frame: number) {
   if (frame < pause.stack.length) return;
   throw new ToolError(pause.stack.length === 0 ? 'The paused game reports no stack frames' : `frame must be between 0 and ${pause.stack.length - 1}`);
+}
+
+/**
+ * A pause with the variables of `frame` read now, instead of those read when it began, which
+ * set_node_property and evaluate may since have changed
+ */
+async function pauseReply(session: DebugSession, pause: PauseState, frame: number): Promise<ToolReply> {
+  if (frame !== 0) checkFrame(pause, frame);
+  // A pause outside any script has no frame to read
+  const variables = pause.stack.length > 0 ? await session.frameVariables(frame) : null;
+  return jsonReply({ status: 'paused', pause: { ...pause, frame, variables } });
 }
 
 /** The game's debug state: exited, running, or paused with the captured pause state */
