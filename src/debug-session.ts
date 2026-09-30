@@ -7,6 +7,7 @@
  */
 
 import net from 'net';
+import { setTimeout as sleep } from 'timers/promises';
 
 import { FrameReader, encodeFrame } from './debugger-frames.js';
 import { variantToJson } from './runtime-values.js';
@@ -15,6 +16,9 @@ import { Variant, decodeVariant } from './variant.js';
 // Distinct errors kept per run; later reports are counted but not stored
 const MAX_REPORTED_ERRORS = 200;
 const REQUEST_TIMEOUT_MS = 3000;
+// How long and how often sceneTree reads a starting game's tree again
+const SCENE_START_TIMEOUT_MS = 3000;
+const SCENE_START_POLL_MS = 50;
 
 export interface ReportedError {
   message: string;
@@ -411,8 +415,29 @@ export class DebugSession {
 
   /**
    * The live scene tree, rooted at the Window /root. Also refreshes the path cache used by findNode.
+   * The game connects while it starts, before it adds the autoloads and the main scene to the root,
+   * so a running game's empty root is read again until they appear, for up to SCENE_START_TIMEOUT_MS.
    */
   async sceneTree(): Promise<RemoteNode> {
+    const deadline = Date.now() + SCENE_START_TIMEOUT_MS;
+    let root = await this.requestSceneTree();
+    while (root.children.length === 0 && this.state.kind === 'running' && Date.now() < deadline) {
+      await sleep(SCENE_START_POLL_MS);
+      root = await this.requestSceneTree();
+    }
+
+    this.nodesByPath.clear();
+    this.pathsById.clear();
+    const remember = (node: RemoteNode) => {
+      this.nodesByPath.set(node.path, node);
+      this.pathsById.set(String(node.id), node.path);
+      node.children.forEach(remember);
+    };
+    remember(root);
+    return root;
+  }
+
+  private async requestSceneTree(): Promise<RemoteNode> {
     const { data } = await this.request('scene:request_scene_tree', [], replyNamed('scene:scene_tree'));
     // Nodes arrive in pre-order as [child_count, name, type_name, id, scene_file_path, view_flags]
     let index = 0;
@@ -424,17 +449,7 @@ export class DebugSession {
       for (let i = 0; i < Number(childCount); i++) node.children.push(readNode(path));
       return node;
     };
-    const root = readNode('');
-
-    this.nodesByPath.clear();
-    this.pathsById.clear();
-    const remember = (node: RemoteNode) => {
-      this.nodesByPath.set(node.path, node);
-      this.pathsById.set(String(node.id), node.path);
-      node.children.forEach(remember);
-    };
-    remember(root);
-    return root;
+    return readNode('');
   }
 
   /**
