@@ -152,6 +152,31 @@ test('evaluate returns the value in the paused frame', async (t) => {
   assert.deepEqual(messages('evaluate'), [['direction * speed', 0]]);
 });
 
+test('evaluate rejects a frame outside the stack without sending it', async (t) => {
+  const { call, json, hitBreakpoint, messages } = await setup(t);
+  await hitBreakpoint();
+
+  const reply = await call('evaluate', { expression: 'speed', frame: 1 });
+
+  assert.equal(reply.isError, true);
+  assert.equal(reply.content.at(-1).text, 'frame must be between 0 and 0');
+  assert.deepEqual(messages('evaluate'), []);
+  assert.equal((await json('get_debug_state')).status, 'paused');
+});
+
+test('evaluate fails as soon as Godot resumes the game instead of answering', async (t) => {
+  const { debug, call, json, hitBreakpoint } = await setup(t);
+  await hitBreakpoint();
+  // What Godot does for a frame without a script instance, e.g. in a static function
+  debug.answer('evaluate', frames.debug_exit);
+
+  const reply = await call('evaluate', { expression: 'speed' });
+
+  assert.equal(reply.isError, true);
+  assert.equal(reply.content[0].text, 'Godot did not evaluate the expression: The game resumed without answering');
+  assert.equal((await json('get_debug_state')).status, 'running');
+});
+
 test('a pending request fails as soon as the game disconnects', async (t) => {
   const { debug, call, hitBreakpoint } = await setup(t);
   await hitBreakpoint();
