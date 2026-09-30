@@ -115,6 +115,19 @@ test('get_debug_state reads the variables of another stack frame', async (t) => 
   assert.equal(outOfRange.content.at(-1).text, 'frame must be between 0 and 1');
 });
 
+test('get_debug_state and pause_game read the variables of an existing pause again', async (t) => {
+  const { debug, json, hitBreakpoint } = await setup(t);
+  await hitBreakpoint();
+  // As after set_node_property changed a member while the game was paused
+  debug.answer('get_stack_frame_vars', debuggerFrame('stack_frame_vars', THREAD_ID, [1]), debuggerFrame('stack_frame_var', THREAD_ID, ['speed', 1, 2, 55, '']));
+
+  const state = await json('get_debug_state');
+  const paused = await json('pause_game');
+
+  assert.deepEqual(state.pause.variables, { locals: {}, members: { speed: 55 } });
+  assert.deepEqual(paused.pause.variables, { locals: {}, members: { speed: 55 } });
+});
+
 test('concurrent reads of different stack frames each get their own variables', async (t) => {
   const { debug, json, hitBreakpoint } = await setup(t);
   debug.answer('get_stack_dump', debuggerFrame('stack_dump', THREAD_ID, [9, 'res://player.gd', 12, '_process', 'res://main.gd', 4, 'tick', 'res://main.gd', 2, '_ready']));

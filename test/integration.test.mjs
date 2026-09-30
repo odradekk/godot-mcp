@@ -348,6 +348,9 @@ test('real Godot: breakpoints, stepping, evaluate and breakOnError', { skip }, a
 
   assert.deepEqual((await json('evaluate', { expression: 'direction * speed' })).value.value, [0, 0]);
 
+  await call(client, 'set_node_property', { nodePath: '/root/Main/Player', property: 'speed', value: 55 });
+  assert.equal((await json('get_debug_state')).value.pause.variables.members.speed, 55);
+
   const stepped = (await json('resume_game', { action: 'next' })).value;
   assert.equal(stepped.pause?.reason, 'step', JSON.stringify(stepped));
   assert.equal(stepped.pause.stack[0].line, 13);
