@@ -66,6 +66,7 @@ class LineLog {
 }
 
 interface Run {
+  projectPath: string;
   process: ChildProcess;
   output: LineLog;
   errors: LineLog;
@@ -87,11 +88,13 @@ export class ProjectRunner {
   ) {}
 
   /**
-   * Start a game run, first stopping the current one and waiting for it to exit. With a debugger
-   * setup, the game connects to a debug session that listens before the game is launched.
+   * Start a game run of the project at `projectPath`, passing `args` (e.g. a scene) after it, first
+   * stopping the current run and waiting for it to exit. With a debugger setup, the game connects
+   * to a debug session that listens before the game is launched.
    */
-  async start(godotPath: string, args: string[], debuggerSetup: DebuggerSetup): Promise<void> {
+  async start(godotPath: string, projectPath: string, args: string[], debuggerSetup: DebuggerSetup): Promise<void> {
     await this.stop();
+    args = ['--path', projectPath, ...args];
 
     let session: DebugSession | null = null;
     let unattachedReason: string | undefined;
@@ -115,6 +118,7 @@ export class ProjectRunner {
     const errors = new LineLog(maxLines);
     let finish!: (exitCode: number | null) => void;
     const run: Run = {
+      projectPath,
       process,
       output,
       errors,
@@ -170,6 +174,11 @@ export class ProjectRunner {
       reportedErrors: run.session?.reportedErrors() ?? [],
       droppedReportedErrors: run.session?.droppedErrorReports ?? 0,
     };
+  }
+
+  /** The project of the current or last run; null if no run has been started */
+  projectPath(): string | null {
+    return this.current?.projectPath ?? null;
   }
 
   /**

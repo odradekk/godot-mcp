@@ -5,6 +5,7 @@
 
 import { DebuggerSetup } from '../godot-run.js';
 import { ToolContext, ToolDefinition, ToolError, godotVersionAtLeast, jsonReply, projectPathParam, textReply } from '../tool-requests.js';
+import { missingScriptsWarning } from './debug.js';
 import { sceneFile } from './scene.js';
 
 export function runTools(ctx: ToolContext): ToolDefinition[] {
@@ -26,13 +27,11 @@ export function runTools(ctx: ToolContext): ToolDefinition[] {
       handle: async (args) => {
         // No -d: the local debugger would stop the game at the first script error and wait for commands
         // on stdin, which no tool can send. Errors and their GDScript backtraces still reach stderr.
-        const cmdArgs = ['--path', args.projectPath];
-        if (args.scene) {
-          cmdArgs.push(args.scene);
-        }
-        ctx.log(`Running Godot project: ${cmdArgs.join(' ')}`);
-        await ctx.runner.start(ctx.godotPath, cmdArgs, await debuggerSetup(ctx, args.breakOnError));
-        return textReply(`Godot project started. Use get_debug_output to see its output and errors.`);
+        const sceneArgs = args.scene ? [args.scene] : [];
+        ctx.log(`Running Godot project: ${[args.projectPath, ...sceneArgs].join(' ')}`);
+        await ctx.runner.start(ctx.godotPath, args.projectPath, sceneArgs, await debuggerSetup(ctx, args.breakOnError));
+        const warning = missingScriptsWarning(args.projectPath, ctx.breakpoints.values());
+        return textReply(`Godot project started. Use get_debug_output to see its output and errors.${warning ? `\n${warning}` : ''}`);
       },
     },
     {
