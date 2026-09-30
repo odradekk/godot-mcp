@@ -110,6 +110,13 @@ func instantiate_class(name_of_class):
 func to_res_path(path):
     return path if path.begins_with("res://") else "res://" + path
 
+# For a load failure: why a file that exists has no loader, or "". Godot loads an asset such as an
+# image from the files it writes when it imports the project, and headless --script runs do not import.
+func not_imported_note(res_path):
+    if FileAccess.file_exists(res_path) and not ResourceLoader.exists(res_path):
+        return ". It has not been imported: import the project with update_project_uids (Godot 4.4+) or by opening it in the editor"
+    return ""
+
 # Load a scene file and instantiate it. Returns the scene's root node.
 func load_scene_root(path):
     var res_path = to_res_path(path)
@@ -150,7 +157,7 @@ func set_node_properties(node, properties):
         if property_type == TYPE_OBJECT and typeof(value) == TYPE_STRING and value.begins_with("res://"):
             value = load(value) if ResourceLoader.exists(value) else null
             if value == null:
-                return fail("Cannot load resource " + properties[property] + " for property: " + property)
+                return fail("Cannot load resource " + properties[property] + " for property: " + property + not_imported_note(properties[property]))
         elif typeof(value) == TYPE_DICTIONARY and property_type != TYPE_DICTIONARY:
             value = dictionary_to_type(value, property_type)
             if value == null:
@@ -251,7 +258,7 @@ func load_sprite(params):
     var texture_path = to_res_path(params.texturePath)
     var texture = load(texture_path)
     if not texture is Texture2D:
-        return fail("Failed to load texture: " + texture_path)
+        return fail("Failed to load texture: " + texture_path + not_imported_note(texture_path))
     sprite_node.texture = texture
     if not save_scene_root(scene_root, params.scenePath):
         return
