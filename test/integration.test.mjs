@@ -137,6 +137,23 @@ test('real Godot: a class_name script can be used once the project has been impo
   assert.equal(text(imported), 'Scene created successfully at: res://a.tscn');
 });
 
+test('real Godot: an image that has not been imported is reported as such', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const redPixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
+  const projectPath = await makeProject(t, { 'art/red.png': redPixel });
+  await call(client, 'create_scene', { projectPath, scenePath: 'main.tscn' });
+  await call(client, 'add_node', { projectPath, scenePath: 'main.tscn', nodeType: 'Sprite2D', nodeName: 'S' });
+
+  const sprite = await call(client, 'load_sprite', { projectPath, scenePath: 'main.tscn', nodePath: 'root/S', texturePath: 'art/red.png' });
+  const property = await call(client, 'add_node', {
+    projectPath, scenePath: 'main.tscn', nodeType: 'Sprite2D', nodeName: 'T', properties: { texture: 'res://art/red.png' },
+  });
+
+  const note = 'It has not been imported: import the project with update_project_uids (Godot 4.4+) or by opening it in the editor';
+  assert.equal(sprite.content[0].text, `Failed to load sprite: Failed to load texture: res://art/red.png. ${note}`);
+  assert.equal(property.content[0].text, `Failed to add node: Cannot load resource res://art/red.png for property: texture. ${note}`);
+});
+
 test('real Godot: UID tools', { skip }, async (t) => {
   const client = await realGodot(t);
   const projectPath = await makeProject(t, { 'player.gd': 'extends Node\n' });
