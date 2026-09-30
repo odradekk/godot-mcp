@@ -140,9 +140,10 @@ export async function prepareRequest(
 ): Promise<{ args: ToolArgs } | { error: ToolReply }> {
   // Only top-level names are converted; values such as add_node's properties pass through unchanged
   const args: ToolArgs = {};
-  for (const name of Object.keys(tool.params)) {
-    const value = rawArgs[name] ?? rawArgs[snakeCase(name)];
-    if (value !== undefined && value !== null) {
+  for (const [name, param] of Object.entries(tool.params)) {
+    const value = rawArgs[name] !== undefined ? rawArgs[name] : rawArgs[snakeCase(name)];
+    // null counts as missing, except for parameters taking any JSON value, where it is a value
+    if (value !== undefined && (value !== null || param.type === 'any')) {
       args[name] = value;
     }
   }

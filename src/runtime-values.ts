@@ -50,7 +50,8 @@ const VECTOR_AXES: Partial<Record<VariantType, string[]>> = {
 };
 
 export const SETTABLE_TYPES =
-  'bool, int, float, String, StringName, NodePath, Vector2/2i/3/3i/4/4i ({x,y,...} or an array), Color ({r,g,b,a?} or an array), and Arrays of bools, numbers and strings';
+  'bool, int, float, String, StringName, NodePath, Vector2/2i/3/3i/4/4i ({x,y,...} or an array), Color ({r,g,b,a?} or an array), ' +
+  'Arrays of bools, numbers and strings, and null for an Object (node or resource)';
 
 /**
  * The Variant to send for setting a property of `type` to a JSON value. Throws with a message for
@@ -84,6 +85,10 @@ export function jsonToVariant(type: VariantType, json: unknown): unknown {
     case VariantType.ARRAY:
       if (!Array.isArray(json) || !json.every((item) => ['boolean', 'number', 'string'].includes(typeof item))) throw mismatch();
       return json;
+    case VariantType.OBJECT:
+      // An object cannot be made from JSON, only cleared
+      if (json !== null) throw new Error(`An Object property can only be set to null. Settable types: ${SETTABLE_TYPES}`);
+      return null;
     default: {
       const axes = VECTOR_AXES[type];
       if (!axes) throw new Error(`A ${name} property cannot be set from JSON. Settable types: ${SETTABLE_TYPES}`);
