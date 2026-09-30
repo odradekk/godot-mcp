@@ -132,6 +132,16 @@ test('a resource-valued property is reported by its path', async (t) => {
   assert.deepEqual(result.properties, { texture: { resource: 'res://gradient.tres' } });
 });
 
+test('"/" is the window root', async (t) => {
+  const { json } = await setup(t);
+
+  const { tree } = await json('get_scene_tree', { path: '/' });
+  const { node } = await json('get_node_properties', { nodePath: '/' });
+
+  assert.equal(tree.path, '/root');
+  assert.equal(node.path, '/root');
+});
+
 test('an unknown node path refreshes the tree once, then suggests the closest paths', async (t) => {
   const { call, debug } = await setup(t);
   await call('get_scene_tree');

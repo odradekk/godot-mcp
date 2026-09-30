@@ -192,9 +192,10 @@ async function inspectNode(session: DebugSession, path: string): Promise<{ node:
   return { node, inspected };
 }
 
-// Runtime node paths are absolute; the leading "/" is optional for agents
+// Runtime node paths are absolute; the leading "/" is optional for agents, and "/" alone is the window root
 function runtimePath(path: string): string {
   const trimmed = path.replace(/\/+$/, '');
+  if (trimmed === '') return '/root';
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
 }
 
