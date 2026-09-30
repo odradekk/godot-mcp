@@ -99,7 +99,8 @@ func instantiate_class(name_of_class):
                 return fail(failure + "Its script could not be loaded: " + global_class["path"])
             log_debug("Instantiating global class " + name_of_class + " from " + global_class["path"])
             return script.new()
-    return fail(failure + "It must be a Godot class that can be instantiated or a global script class (class_name).")
+    # The global class list is written when the project is imported; headless --script runs do not import
+    return fail(failure + "It must be a Godot class that can be instantiated or a global script class (class_name). Godot registers a class_name script when it imports the project: for a script added since the last import, import the project with update_project_uids (Godot 4.4+) or by opening it in the editor.")
 
 # --- Scene editing ---
 # Shared by the scene operations. On failure these return fail(...), which is null, and on
