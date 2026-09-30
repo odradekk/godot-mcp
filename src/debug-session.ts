@@ -116,9 +116,10 @@ export class DebugSession {
   droppedErrorReports = 0;
 
   // Godot's replies carry no request id, so requests go out one at a time: `queue` settles when the
-  // last queued request has, and `pending` receives every message while a request is in flight
+  // last queued request has, and `pending` receives every message while a request is in flight.
+  // `forPause` marks a request addressed to the paused thread, which Godot answers only while paused.
   private queue: Promise<void> = Promise.resolve();
-  private pending: { receive(name: string, data: Variant[]): void; fail(error: Error): void } | null = null;
+  private pending: { receive(name: string, data: Variant[]): void; fail(error: Error): void; forPause: boolean } | null = null;
   // From the last scene tree the game sent
   private nodesByPath = new Map<string, RemoteNode>();
   private pathsById = new Map<string, string>();
@@ -236,6 +237,9 @@ export class DebugSession {
     } else if (name === 'debug_enter') {
       this.enterPause(args);
     } else if (name === 'debug_exit' && this.state.kind === 'paused') {
+      // Godot also leaves the pause instead of answering some requests, e.g. evaluate in a frame
+      // without a script instance
+      if (this.pending?.forPause) this.pending.fail(new Error('The game resumed without answering'));
       this.setState({ kind: 'running' });
     }
   }
@@ -380,7 +384,7 @@ export class DebugSession {
 
   /**
    * Evaluate an expression in a frame of the paused game (Godot 4.4+). Godot returns null when the
-   * expression fails, and does not answer at all outside a script instance's frame.
+   * expression fails. Outside a script instance's frame it resumes the game instead of answering.
    */
   async evaluate(expression: string, frame: number): Promise<unknown> {
     const { data } = await this.request('evaluate', [expression, frame], replyNamed('evaluation_return'), this.pausedThread);
@@ -542,6 +546,7 @@ export class DebugSession {
         settle();
       };
       this.pending = {
+        forPause: threadId !== undefined,
         receive: (replyName, replyData) => {
           const result = collect(replyName, replyData);
           if (result === undefined) return;

@@ -3,7 +3,7 @@
  * game, through the remote debugger.
  */
 
-import { DebugSession, ResumeAction } from '../debug-session.js';
+import { DebugSession, PauseState, ResumeAction } from '../debug-session.js';
 import { ToolContext, ToolDefinition, ToolError, ToolReply, godotVersionAtLeast, jsonReply } from '../tool-requests.js';
 import { requireSession, sessionUnavailable } from './runtime.js';
 
@@ -110,9 +110,7 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         if (frame !== 0) {
           const pause = session.pause;
           if (!pause) throw new ToolError('The game is not paused, so it has no stack frames to read');
-          if (frame >= pause.stack.length) {
-            throw new ToolError(`frame must be between 0 and ${pause.stack.length - 1}`);
-          }
+          checkFrame(pause, frame);
           return jsonReply({ status: 'paused', pause: { ...pause, frame, variables: await session.frameVariables(frame) } });
         }
         return debugStateReply(ctx, session);
@@ -131,18 +129,26 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
       minGodot: { version: [4, 4], feature: 'evaluating expressions', solutions: ['Upgrade to Godot 4.4 or later to evaluate expressions'] },
       handle: async (args) => {
         const session = requireSession(ctx.runner);
-        if (!session.pause) throw new ToolError('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
+        const pause = session.pause;
+        if (!pause) throw new ToolError('The game is not paused', ['Pause it first with pause_game or a breakpoint']);
+        // Godot resumes the game instead of answering for a frame it cannot evaluate in
+        checkFrame(pause, args.frame);
         try {
           return jsonReply({ expression: args.expression, frame: args.frame, value: await session.evaluate(args.expression, args.frame) });
         } catch (error) {
-          // Godot does not answer outside a script instance's frame (e.g. in a static function)
           throw new ToolError(`Godot did not evaluate the expression: ${error instanceof Error ? error.message : error}`, [
-            'Godot evaluates only in frames that belong to a script instance',
+            'Godot evaluates only in frames that belong to a script instance, not in static functions; in other frames it resumes the game',
           ]);
         }
       },
     },
   ];
+}
+
+/** Throws unless the paused stack has `frame` */
+function checkFrame(pause: PauseState, frame: number) {
+  if (frame < pause.stack.length) return;
+  throw new ToolError(pause.stack.length === 0 ? 'The paused game reports no stack frames' : `frame must be between 0 and ${pause.stack.length - 1}`);
 }
 
 /** The game's debug state: exited, running, or paused with the captured pause state */
