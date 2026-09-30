@@ -124,6 +124,19 @@ test('real Godot: add_node loads res:// strings only for properties that take a 
   assert.equal(missing.content[0].text, 'Failed to add node: Cannot load resource res://missing.tres for property: mesh');
 });
 
+test('real Godot: a class_name script can be used once the project has been imported', { skip }, async (t) => {
+  const client = await realGodot(t);
+  const projectPath = await makeProject(t, { 'thing.gd': 'class_name Thing\nextends Node2D\n' });
+
+  const notImported = await call(client, 'create_scene', { projectPath, scenePath: 'a.tscn', rootNodeType: 'Thing' });
+  assert.equal(notImported.isError, true);
+  assert.match(notImported.content[0].text, /import the project with update_project_uids/);
+
+  await call(client, 'update_project_uids', { projectPath });
+  const imported = await call(client, 'create_scene', { projectPath, scenePath: 'a.tscn', rootNodeType: 'Thing' });
+  assert.equal(text(imported), 'Scene created successfully at: res://a.tscn');
+});
+
 test('real Godot: UID tools', { skip }, async (t) => {
   const client = await realGodot(t);
   const projectPath = await makeProject(t, { 'player.gd': 'extends Node\n' });
