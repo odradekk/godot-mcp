@@ -182,6 +182,8 @@ test('set_node_property encodes the JSON value as the property type', async (t) 
     ['speed', 200, 'speed', 3, 200], // float, as declared
     ['position', [5, 6], 'position', 5, [5, 6]],
     ['visible', false, 'visible', 1, false],
+    ['target', null, 'Members/target', 0, null], // a node reference, cleared
+    ['material', null, 'material', 0, null], // an Object property, cleared
   ];
 
   for (const [property, value, sentName, variantType, decoded] of cases) {
@@ -202,10 +204,12 @@ test('set_node_property rejects values it cannot convert, before sending anythin
 
   const object = await call('set_node_property', { nodePath: '/root/Main/Player', property: 'material', value: 'res://m.tres' });
   const shape = await call('set_node_property', { nodePath: '/root/Main/Player', property: 'position', value: 'left' });
+  const nullVector = await call('set_node_property', { nodePath: '/root/Main/Player', property: 'position', value: null });
   const unknown = await call('set_node_property', { nodePath: '/root/Main/Player', property: 'nope', value: 1 });
 
-  assert.match(object.content[0].text, /^Cannot set material: A OBJECT property cannot be set from JSON\. Settable types: bool, int/);
+  assert.match(object.content[0].text, /^Cannot set material: An Object property can only be set to null\. Settable types: bool, int/);
   assert.equal(shape.content[0].text, 'Cannot set position: "left" does not fit a VECTOR2 property');
+  assert.equal(nullVector.content[0].text, 'Cannot set position: null does not fit a VECTOR2 property');
   assert.equal(unknown.content[0].text, '/root/Main/Player has no property or script variable named nope');
   assert.equal(sent(debug, 'scene:set_object_property').length, 0);
 });

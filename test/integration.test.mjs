@@ -268,7 +268,7 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
   const projectPath = await makeProject(t, {
     'project.godot': 'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n\n[autoload]\n\nScore="*res://score.gd"\n',
     'score.gd': 'extends Node\n\nvar points = 0\n',
-    'player.gd': 'extends Node2D\n\n@export var speed = 0.0\nvar velocity = Vector2.ZERO\n\nfunc _process(delta):\n\tposition += velocity * delta\n',
+    'player.gd': 'extends Node2D\n\n@export var speed = 0.0\nvar velocity = Vector2.ZERO\n@onready var target: Node = get_parent()\n\nfunc _process(delta):\n\tposition += velocity * delta\n',
     'main.tscn': scene,
   });
 
@@ -288,8 +288,11 @@ test('real Godot: inspect and change a running node', { skip }, async (t) => {
   assert.ok(paths.includes('/root/Score') && paths.includes('/root/Main/Player'), paths.join(', '));
 
   const before = JSON.parse(text(await call(client, 'get_node_properties', { nodePath: '/root/Main/Player' })));
-  assert.deepEqual(before.script, { velocity: [0, 0], speed: 0 });
+  assert.deepEqual(before.script, { velocity: [0, 0], speed: 0, target: { node: '/root/Main' } });
   assert.deepEqual(before.properties.position, [0, 0]);
+
+  const cleared = JSON.parse(text(await call(client, 'set_node_property', { nodePath: '/root/Main/Player', property: 'target', value: null })));
+  assert.equal(cleared.value, null);
 
   const set = JSON.parse(text(await call(client, 'set_node_property', { nodePath: '/root/Main/Player', property: 'velocity', value: { x: 120, y: 0 } })));
   assert.deepEqual(set.value, [120, 0]);
