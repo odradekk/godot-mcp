@@ -3,7 +3,10 @@
  * game, through the remote debugger.
  */
 
-import { DebugSession, PauseState, ResumeAction } from '../debug-session.js';
+import { existsSync } from 'fs';
+import { join } from 'path';
+
+import { Breakpoint, DebugSession, PauseState, ResumeAction } from '../debug-session.js';
 import { ToolContext, ToolDefinition, ToolError, ToolReply, godotVersionAtLeast, jsonReply } from '../tool-requests.js';
 import { requireSession, sessionUnavailable } from './runtime.js';
 
@@ -13,7 +16,8 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
       name: 'set_breakpoint',
       description:
         'Set or clear a breakpoint at a script line. Breakpoints are kept across runs and apply to the running game at once. ' +
-        'While any is set, breakpoint statements in scripts pause the game too. Returns all breakpoints',
+        'While any is set, breakpoint statements in scripts pause the game too. Returns all breakpoints, and a warning ' +
+        'when the script is missing from the project of the current or last run (the script may be created later)',
       params: {
         file: { type: 'string', description: 'Script path, relative to the project or res://', check: 'projectFile' },
         line: { type: 'integer', description: 'Line number (1-based)', minimum: 1 },
@@ -29,7 +33,10 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
         else ctx.breakpoints.delete(key);
 
         ctx.runner.debugSession()?.setBreakpoint(breakpoint, enabled);
-        return jsonReply({ breakpoints: [...ctx.breakpoints.values()] });
+        // Without a run, which project the script belongs to is unknown; run_project checks it then
+        const projectPath = ctx.runner.projectPath();
+        const warning = enabled && projectPath ? missingScriptsWarning(projectPath, [breakpoint]) : null;
+        return jsonReply({ breakpoints: [...ctx.breakpoints.values()], ...(warning ? { warning } : {}) });
       },
     },
     {
@@ -149,6 +156,13 @@ export function debugTools(ctx: ToolContext): ToolDefinition[] {
       },
     },
   ];
+}
+
+/** Which of the breakpoints are in scripts missing from the project, as they can never pause the game; null if none */
+export function missingScriptsWarning(projectPath: string, breakpoints: Iterable<Breakpoint>): string | null {
+  const missing = [...breakpoints].filter(({ file }) => !existsSync(join(projectPath, file.slice('res://'.length))));
+  if (missing.length === 0) return null;
+  return `These breakpoints cannot pause the game, as their scripts do not exist in the project: ${missing.map(({ file, line }) => `${file}:${line}`).join(', ')}`;
 }
 
 /** Throws unless the paused stack has `frame` */

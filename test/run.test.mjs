@@ -1,5 +1,7 @@
 // run_project, get_debug_output, stop_project and launch_editor against a fake game process.
 import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { GODOT, connect, fakeLauncher, godotAt, makeProject, text } from './harness.mjs';
@@ -160,6 +162,22 @@ test('get_debug_state before any run_project says to start a game', async (t) =>
   const reply = await call('get_debug_state');
 
   assert.equal(reply.content[0].text, 'No game has been started. Use run_project first.');
+});
+
+test('breakpoints in scripts missing from the project get a warning from run_project and set_breakpoint', async (t) => {
+  const { call, projectPath } = await setup(t);
+  await writeFile(join(projectPath, 'player.gd'), 'extends Node\n');
+  const warning = 'These breakpoints cannot pause the game, as their scripts do not exist in the project:';
+
+  await call('set_breakpoint', { file: 'ghost.gd', line: 3 });
+  await call('set_breakpoint', { file: 'player.gd', line: 1 });
+  const started = text(await call('run_project', { projectPath }));
+  const missing = JSON.parse(text(await call('set_breakpoint', { file: 'res://other.gd', line: 5 })));
+  const existing = JSON.parse(text(await call('set_breakpoint', { file: 'player.gd', line: 2 })));
+
+  assert.equal(started, `Godot project started. Use get_debug_output to see its output and errors.\n${warning} res://ghost.gd:3`);
+  assert.equal(missing.warning, `${warning} res://other.gd:5`);
+  assert.equal(existing.warning, undefined);
 });
 
 test('launch_editor starts the editor detached from the server', async (t) => {
