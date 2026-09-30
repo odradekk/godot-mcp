@@ -4,7 +4,7 @@
  */
 
 import { existsSync, statSync } from 'fs';
-import { join } from 'path';
+import { join, win32 } from 'path';
 
 import { Breakpoint } from './debug-session.js';
 import { GodotLauncher } from './godot-launcher.js';
@@ -23,8 +23,8 @@ export interface ToolReply {
  * What request preparation verifies about a parameter before the tool runs.
  * - project: a directory containing project.godot
  * - directory: an existing directory
- * - projectFile: a path inside the project; must not contain '..'
- * - existingFile: a projectFile that must exist; may be given relative to the project or as res://
+ * - projectFile: a path inside the project, relative to it or as res://; must not be absolute or contain '..'
+ * - existingFile: a projectFile that must exist
  * - className: a Godot class name, so agents cannot instantiate arbitrary scripts by path
  * Every check except className also rejects paths containing '..'.
  */
@@ -173,6 +173,9 @@ export async function prepareRequest(
       }
     } else if (value.includes('..')) {
       return { error: errorReply(`Invalid path in ${name}: ${value}`, ['Provide a path without ".." or other potentially unsafe characters']) };
+    } else if ((param.check === 'projectFile' || param.check === 'existingFile') && win32.isAbsolute(value)) {
+      // win32 also recognizes POSIX absolute paths, so both are rejected on every platform
+      return { error: errorReply(`Invalid path in ${name}: ${value}`, ['Provide the path relative to the project (e.g. "scenes/main.tscn") or as res://, not as an absolute path']) };
     }
   }
 

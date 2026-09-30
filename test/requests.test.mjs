@@ -78,6 +78,10 @@ test('pre-checks reject bad arguments with one message per check, before Godot r
     ['load_sprite', { scenePath: 'main.tscn', nodePath: 'root', texturePath: 'missing.png' }, 'Texture file does not exist: missing.png'],
     ['run_project', { scene: 'missing.tscn' }, 'Scene file does not exist: missing.tscn'],
     ['save_scene', { scenePath: 'main.tscn', newPath: '../outside.tscn' }, 'Invalid path in newPath: ../outside.tscn'],
+    ['create_scene', { scenePath: 'C:\\proj\\abs.tscn', rootNodeType: 'Node2D' }, 'Invalid path in scenePath: C:\\proj\\abs.tscn'],
+    ['save_scene', { scenePath: 'main.tscn', newPath: '/home/me/proj/abs.tscn' }, 'Invalid path in newPath: /home/me/proj/abs.tscn'],
+    ['add_node', { scenePath: 'C:/proj/main.tscn', nodeType: 'Node2D', nodeName: 'X' }, 'Invalid path in scenePath: C:/proj/main.tscn'],
+    ['set_breakpoint', { file: '/proj/player.gd', line: 1 }, 'Invalid path in file: /proj/player.gd'],
   ];
 
   for (const [name, args, message] of cases) {
